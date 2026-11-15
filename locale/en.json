@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Session Transfer",
+    "description": "Pack any session with its subagent sessions and attachments into a .dshpack, then import it into another DSH installation."
+  }
+}
