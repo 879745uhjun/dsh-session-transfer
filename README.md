@@ -117,9 +117,10 @@ Packs are **not encrypted**. They contain the full conversation, which may inclu
 - **"Preset not found"?** The import already substituted the default and reported a warning; install the original preset first if you need it.
 - **Attachments?** Always included so the restored session renders; very large attachments make a large pack.
 - **Errors with no explanation?**
-- Check  for the host plugin, its version, and mounted services;
-- The host keeps a diagnostics log at  (failures only);
-- "Session no longer exists" means the sidebar still shows a deleted row; refresh the list and pick another session.
+  - Check `http://127.0.0.1:<DSH port>/session-transfer/health` for the host plugin, its version, and mounted services;
+  - The host keeps a diagnostics log at `~/.dsh/tmp/session-transfer.log` (failures only);
+  - "Session no longer exists" means the sidebar still shows a deleted row; refresh the list and pick another session.
+
 ## Development
 
 ```bash
