@@ -124,4 +124,13 @@ Packs are **not encrypted**. They contain the full conversation, which may inclu
 npm test   # zero-dependency node:test suite for ZIP, pack codec, and import/export
 ```
 
+Development notes:
+
+- [Where a plugin-dev session spends its time](docs/time-audit.zh.md) (Chinese): a real session's model/tool/idle breakdown plus a speed-up checklist;
+- `docs/session-time-audit.mjs` audits any DSH session's timing:
+
+```bash
+node docs/session-time-audit.mjs --session <session id>
+```
+
 MIT License.

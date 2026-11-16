@@ -155,4 +155,13 @@ npm test        # ZIP / 包格式 / 导入导出的单元测试（node:test，�
 - `index.js`：宿主插件（HTTP 路由 + 两个智能体工具）；
 - `client.js`：Web 端入口（会话菜单、底部导入按钮、导入对话框、打包进度卡片）。
 
+开发复盘：
+
+- [DSH 插件开发耗时分析与提速清单](docs/time-audit.zh.md)：一次真实插件开发会话的时间账、根因与提速清单；
+- `docs/session-time-audit.mjs`：通用会话耗时审计脚本，可分析任意 DSH 会话的模型/工具/空闲耗时：
+
+```bash
+node docs/session-time-audit.mjs --session <会话 id>
+```
+
 MIT License。
