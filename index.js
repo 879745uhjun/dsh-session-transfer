@@ -22,7 +22,7 @@ import { open, rename, rm, stat } from 'node:fs/promises'
 import { appendFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { TransferError, SessionTransfer, MAX_PACK_BYTES, packFilename, contentDisposition, isInside, resolveDshHome } from './lib/transfer.mjs'
+import { TransferError, SessionTransfer, MAX_PACK_BYTES, packFilename, contentDisposition, isInside, resolveDshHome, detectFormatVersion } from './lib/transfer.mjs'
 import { readFileSync } from 'node:fs'
 
 /** Cordis plugin name. */
@@ -45,6 +45,7 @@ const ROUTE_EXPORT = '/session-transfer/export'
 const ROUTE_IMPORT = '/session-transfer/import'
 const ROUTE_WORKSPACES = '/session-transfer/workspaces'
 const ROUTE_INSPECT = '/session-transfer/inspect'
+const ROUTE_HEALTH = '/session-transfer/health'
 
 /** How long one preflighted upload stays staged for its import. */
 const STAGED_TTL_MS = 60 * 60 * 1000
@@ -105,7 +106,9 @@ function sendJson(response, status, value) {
 /** Translate a thrown value into a response without leaking internals. */
 function sendFailure(response, error, log) {
   const known = error instanceof TransferError
-  if (!known) log('request failed', error)
+  // Log every failure, including classified 4xx: without this a user-visible
+  // "pack failed" leaves no trace anywhere in the desktop build.
+  log(known ? `request failed (${error.code})` : 'request failed', error)
   const status = !known
     ? 500
     : error.code === 'TRANSFER_FORMAT_MISMATCH'
@@ -114,7 +117,9 @@ function sendFailure(response, error, log) {
         ? 413
         : error.code === 'TRANSFER_PACK_INVALID'
           ? 422
-          : 400
+          : error.code === 'TRANSFER_SESSION_NOT_FOUND'
+            ? 404
+            : 400
   try {
     sendJson(response, status, {
       ok: false,
@@ -414,6 +419,44 @@ export function apply(ctx) {
           }
         },
       })
+      const removeHealth = scope.webServer.register({
+        kind: 'exact',
+        path: ROUTE_HEALTH,
+        handler: (request, response) => {
+          try {
+            if (!isAcceptableOrigin(request)) return sendJson(response, 403, { ok: false, error: 'cross-origin request refused' })
+            if (request.method !== 'GET') {
+              response.writeHead(405, { allow: 'GET', 'content-type': 'application/json; charset=utf-8' })
+              response.end(JSON.stringify({ ok: false, error: 'method not allowed' }))
+              return
+            }
+            const persistence = ctx.get('sessionPersistence')
+            let workspaces = []
+            try {
+              workspaces = transfer.listWorkspaces()
+            } catch {
+              /* the registry is reported as missing below */
+            }
+            sendJson(response, 200, {
+              ok: true,
+              name: 'dsh-session-transfer',
+              version: VERSION,
+              sessionFormatVersion: detectFormatVersion(persistence, workspaces[0]?.path ?? process.cwd()),
+              services: {
+                persistence: persistence !== undefined,
+                attachments: ctx.get('attachments') !== undefined,
+                sessionQuery: ctx.get('sessionQuery') !== undefined,
+                workspaces: ctx.get('workspaceRegistry') !== undefined,
+                presets: ctx.get('agentPresets') !== undefined,
+              },
+              workspaces: workspaces.length,
+              packsDir: transfer.packsDir,
+            })
+          } catch (error) {
+            sendFailure(response, error, log)
+          }
+        },
+      })
       const removeWorkspaces = scope.webServer.register({
         kind: 'exact',
         path: ROUTE_WORKSPACES,
@@ -432,6 +475,7 @@ export function apply(ctx) {
         },
       })
       return () => {
+        removeHealth()
         removeWorkspaces()
         removeImport()
         removeInspect()

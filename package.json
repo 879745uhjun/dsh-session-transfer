@@ -1,6 +1,6 @@
 {
   "name": "dsh-session-transfer",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Pack any DSH session, its subagent sessions and attachments into a portable .dshpack, and import it into another DSH installation.",
   "type": "module",
   "main": "index.js",

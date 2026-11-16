@@ -72,6 +72,10 @@ window.__ModuleLoader__.load({
       'error.write.hint': 'Nothing was attached. Check the DSH log for the storage failure.',
       'error.input.title': 'Could not read the pack',
       'error.input.hint': 'The preflight may have expired; choose the file again.',
+      'error.notFound.title': 'Session no longer exists',
+      'error.notFound.hint': 'It may have been deleted. Close this dialog, refresh the sidebar, and pick another session.',
+      'error.host.title': 'The host plugin is not answering',
+      'error.host.hint': 'Restart DSH or check that dsh-session-transfer is enabled in Plugins.',
       'error.generic.title': 'Import failed',
       'pack.card.title': 'Packing session',
       'pack.card.preparing': 'Building the archive…',
@@ -79,6 +83,8 @@ window.__ModuleLoader__.load({
       'pack.card.saving': 'Saving the file…',
       'pack.card.done': 'Session pack saved.',
       'pack.card.failed': 'Could not pack the session',
+      'pack.card.missing': 'The session may have been deleted; the sidebar was refreshed. Pick another session.',
+      'pack.card.host': 'The host half is not answering. Restart DSH or check that the plugin is enabled.',
       'pack.card.cancel': 'Cancel',
       'error.workspaces': 'Could not read the workspace list',
       'error.http': 'The host answered HTTP {status}',
@@ -132,6 +138,10 @@ window.__ModuleLoader__.load({
       'error.write.hint': '尚未挂到工作区，请查看 DSH 日志里的存储错误。',
       'error.input.title': '无法读取会话包',
       'error.input.hint': '预检可能已过期，请重新选择文件。',
+      'error.notFound.title': '会话不存在',
+      'error.notFound.hint': '它可能已被删除。关闭对话框、刷新侧边栏后重新选择会话。',
+      'error.host.title': '插件宿主没有响应',
+      'error.host.hint': '请重启 DSH，或在「插件」设置里确认 dsh-session-transfer 已启用。',
       'error.generic.title': '导入失败',
       'pack.card.title': '正在打包会话',
       'pack.card.preparing': '正在生成压缩包…',
@@ -139,6 +149,8 @@ window.__ModuleLoader__.load({
       'pack.card.saving': '正在保存文件…',
       'pack.card.done': '会话包已保存。',
       'pack.card.failed': '会话打包失败',
+      'pack.card.missing': '这个会话可能已被删除；已刷新侧边栏，请重新选择会话。',
+      'pack.card.host': '插件宿主没有响应：请重启 DSH，或在设置里确认插件已启用。',
       'pack.card.cancel': '取消',
       'error.workspaces': '无法读取工作区列表',
       'error.http': '宿主返回 HTTP {status}',
@@ -188,6 +200,7 @@ window.__ModuleLoader__.load({
 
     const abortable = { current: null }
     let inspectSequence = 0
+    let clientCtx = null
 
     function formatSize(bytes) {
       if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
@@ -203,6 +216,19 @@ window.__ModuleLoader__.load({
 
     function messageOf(error) {
       return error instanceof Error ? error.message : String(error)
+    }
+
+    /** One classified failure from the pack route, keeping its stable code. */
+    async function packFailure(response) {
+      let payload
+      try {
+        payload = await response.json()
+      } catch {
+        payload = undefined
+      }
+      const error = new Error(typeof payload?.error === 'string' && payload.error !== '' ? payload.error : `HTTP ${response.status}`)
+      error.code = typeof payload?.code === 'string' ? payload.code : `HTTP_${response.status}`
+      return error
     }
 
     async function readError(response, t) {
@@ -245,6 +271,8 @@ window.__ModuleLoader__.load({
       TRANSFER_ATTACHMENT: ['error.attachment.title', 'error.attachment.hint'],
       TRANSFER_WRITE: ['error.write.title', 'error.write.hint'],
       TRANSFER_INPUT: ['error.input.title', 'error.input.hint'],
+      TRANSFER_SESSION_NOT_FOUND: ['error.notFound.title', 'error.notFound.hint'],
+      HTTP_404: ['error.host.title', 'error.host.hint'],
       BAD_FILE: ['error.input.title', null],
       HTTP_WORKSPACES: ['error.workspace.title', 'error.workspace.hint'],
     }
@@ -272,7 +300,7 @@ window.__ModuleLoader__.load({
         const query = new URLSearchParams({ sessionId })
         if (typeof title === 'string' && title.trim() !== '') query.set('title', title.trim())
         const response = await fetch(`${ROUTE_EXPORT}?${query.toString()}`, { signal: controller.signal })
-        if (!response.ok) throw new Error(await readError(response, (key, values) => key === 'error.http' ? `HTTP ${values?.status ?? response.status}` : key))
+        if (!response.ok) throw await packFailure(response)
         const total = Number(response.headers.get('content-length') ?? 0)
         const filename = filenameOf(response, sessionId, title)
         const chunks = []
@@ -311,7 +339,14 @@ window.__ModuleLoader__.load({
           packStore.set({ status: 'idle', title: '', sessionId: '', received: 0, total: 0, error: null })
           return
         }
-        packStore.set({ status: 'failed', title: title ?? '', sessionId, received: 0, total: 0, error: messageOf(error) })
+        if (error?.code === 'TRANSFER_SESSION_NOT_FOUND') {
+          try {
+            clientCtx?.get('sessions')?.refresh?.()
+          } catch {
+            /* the next focus refresh repairs the list anyway */
+          }
+        }
+        packStore.set({ status: 'failed', title: title ?? '', sessionId, received: 0, total: 0, error: messageOf(error), code: error?.code ?? null })
       } finally {
         if (abortable.current === controller) abortable.current = null
       }
@@ -484,6 +519,8 @@ window.__ModuleLoader__.load({
           h('span', { className: 'dst-toast__title' }, state.title === '' ? t('pack.card.title') : state.title),
         ),
         h('div', { className: 'dst-toast__text' }, description),
+        state.status === 'failed' && state.code === 'TRANSFER_SESSION_NOT_FOUND' && h('div', { className: 'dst-toast__hint' }, t('pack.card.missing')),
+        state.status === 'failed' && state.code === 'HTTP_404' && h('div', { className: 'dst-toast__hint' }, t('pack.card.host')),
         state.status !== 'failed' && state.status !== 'done' && h('div', { className: 'dst-progress' },
           h('div', { className: 'dst-progress__bar', style: { width: `${state.total > 0 ? percent : 15}%` } }),
         ),
@@ -873,6 +910,7 @@ window.__ModuleLoader__.load({
       '.dst-toast__head{display:flex;align-items:center;gap:8px}',
       '.dst-toast__title{font-weight:600;word-break:break-word}',
       '.dst-toast__text{color:var(--dsw-alias-label-secondary);word-break:break-word}',
+      '.dst-toast__hint{margin-top:2px;font-size:11px;color:var(--dsw-alias-label-secondary);word-break:break-word}',
       '.dst-dot{width:8px;height:8px;border-radius:50%;background:var(--dsw-alias-label-secondary);flex:none}',
       '.dst-dot.is-ok{background:var(--dsw-alias-state-success-primary)}',
       '.dst-dot.is-error{background:var(--dsw-alias-state-error-primary)}',
@@ -891,6 +929,7 @@ window.__ModuleLoader__.load({
     return {
       inject: ['slots', 'locale'],
       apply(ctx) {
+        clientCtx = ctx
         ctx.effect(() => {
           const style = document.createElement('style')
           style.setAttribute('data-plugin-css', 'dsh-session-transfer/SessionTransfer.css')

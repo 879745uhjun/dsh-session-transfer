@@ -116,8 +116,10 @@ Packs are **not encrypted**. They contain the full conversation, which may inclu
 - **"Session format incompatible"?** The two DSH builds use different log generations. Align the versions; the plugin never attempts lossy migration.
 - **"Preset not found"?** The import already substituted the default and reported a warning; install the original preset first if you need it.
 - **Attachments?** Always included so the restored session renders; very large attachments make a large pack.
-- **Errors with no explanation?** The host keeps a diagnostics log at `~/.dsh/tmp/session-transfer.log` (failures only, never session content). A failed preflight writes nothing, so it is safe to fix the cause and retry.
-
+- **Errors with no explanation?**
+- Check  for the host plugin, its version, and mounted services;
+- The host keeps a diagnostics log at  (failures only);
+- "Session no longer exists" means the sidebar still shows a deleted row; refresh the list and pick another session.
 ## Development
 
 ```bash

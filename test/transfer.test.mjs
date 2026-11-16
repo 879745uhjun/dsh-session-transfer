@@ -81,6 +81,15 @@ class FakePersistence {
   }
 }
 
+
+/** Fail when any nested value is explicitly undefined (tool outputs must be lossless JSON). */
+function assertJsonClean(value, path = 'root') {
+  if (value === undefined) throw new Error(`undefined at ${path}`)
+  if (value === null || typeof value !== 'object') return
+  if (Array.isArray(value)) { value.forEach((item, index) => assertJsonClean(item, `${path}[${index}]`)); return }
+  for (const [key, nested] of Object.entries(value)) assertJsonClean(nested, `${path}.${key}`)
+}
+
 function notFound(id) {
   const error = new Error(`session "${id}" not found`)
   error.name = 'SessionPersistenceNotFoundError'
@@ -239,6 +248,7 @@ test('exports a session tree with its attachments and imports it into another wo
     assert.equal(exported.images, 1)
     assert.equal(exported.files, 1)
     assert.equal(exported.title, '搬家的会话')
+    assertJsonClean(exported)
 
     const archive = new ZipReader(packPath)
     const manifest = JSON.parse(archive.readText(MANIFEST_NAME))
@@ -337,6 +347,7 @@ test('dryRun validates and plans without writing', async () => {
     })
     const planned = await importer.importPack({ path: packPath, workspace: 'ws', dryRun: true })
     assert.equal(planned.dryRun, true)
+    assertJsonClean(planned)
     assert.equal(planned.sessions.length, 2)
     assert.equal(targetPersistence.sessions.size, 0)
     assert.deepEqual(workspace.sessionIds, [])
