@@ -3,6 +3,25 @@
 本文件记录 dsh-session-transfer 的每次可见变化。版本号遵循语义化版本；此前的迭代只在本地工作区进行，
 本仓库从 1.0.0 起有可追溯的提交历史。
 
+## 1.0.2 — 2026-11-16
+
+### 修复
+
+- **两个智能体工具的 `parameters` 改为 JSON Schema 对象根**：`pack_session`（`sessionId` / `path` / `includeDescendants`，无必填）与 `unpack_session`（`path` / `workspace` / `dryRun`，根级 `required: ['path']`）。原来的裸属性表会被原样发给模型 API，属性名一旦撞上 `title`、`default`、`enum`、`type`、`required`、`items`、`properties` 等 JSON Schema 关键字，整轮请求直接 400；只包 `properties` 而保留属性级 `required: true` 同样会报 `true is not of type "array"`。`unpack_session` 的根级 `required: ['path']` 也是这次唯一的行为级变化：模型侧现在能直接看到 `path` 必填，而此前缺失只会在 `execute` 里报错。
+- **`npm test` 在 Node 24 下跑不起来**：`node --test test/` 被当成模块路径，实际执行 0 个测试；改为 `node --test "test/**/*.test.mjs"`，并新增 `test/tools.test.mjs` 覆盖对象根、`properties`、无裸属性表、根级 `required`，测试数 20 → 22。
+
+### 补充记录（1.0.1 之前的存储坑）
+
+- Windows 上目标图片对象已存在时，`rename` 覆盖会报 `EPERM`；改为先比对内容摘要，相同则复用，并处理并发写入后的竞态。
+- v4 物理头部不接受 `type: "session"` 字段；`persistence.create` 前剥离 `type`，并按 `isSeeded` 传入 `inheritedEventCount`。
+- 以 `link:` 安装的插件启动时读取一次源码，工具 schema 改动必须重启 DSH 才生效（HMR 不覆盖这些目录）。
+
+### 验收
+
+- `node tools/verify-tool-schemas.mjs dsh-session-transfer/index.js` → `pack_session` props=3 required=[]，`unpack_session` props=3 required=[path]，2/2 PASS；
+- `npm test` → 22/22 通过；
+- 主会话重启后线上 `request/header` 复核：41 个工具，两个工具均为对象根。
+
 ## 1.0.1 — 2026-11-16
 
 ### 修复

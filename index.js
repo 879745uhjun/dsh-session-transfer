@@ -170,14 +170,17 @@ async function uniquePath(directory, filename) {
 }
 
 /** The `pack_session` agent tool. */
-function createPackTool(transfer, log) {
+export function createPackTool(transfer, log) {
   return {
     name: 'pack_session',
     description: 'Package one DSH session (conversation, tool history, subagent sessions, and referenced images/files) into a portable .dshpack file that another DSH installation can import with unpack_session. Use this when the user wants to move, back up, or hand off a session to another computer. Omit sessionId to pack the calling session.',
     parameters: {
-      sessionId: { type: 'string', description: 'Session id to pack. Defaults to the calling session.' },
-      path: { type: 'string', description: 'Absolute destination .dshpack path. Defaults to a folder under the DSH home; must be inside the DSH home or a registered workspace.' },
-      includeDescendants: { type: 'boolean', description: 'Include subagent sessions spawned by this session. Defaults to true.' },
+      type: 'object',
+      properties: {
+        sessionId: { type: 'string', description: 'Session id to pack. Defaults to the calling session.' },
+        path: { type: 'string', description: 'Absolute destination .dshpack path. Defaults to a folder under the DSH home; must be inside the DSH home or a registered workspace.' },
+        includeDescendants: { type: 'boolean', description: 'Include subagent sessions spawned by this session. Defaults to true.' },
+      },
     },
     output: {
       schema: { type: 'object' },
@@ -219,14 +222,18 @@ function createPackTool(transfer, log) {
 }
 
 /** The `unpack_session` agent tool. */
-function createImportTool(transfer, log) {
+export function createImportTool(transfer, log) {
   return {
     name: 'unpack_session',
     description: 'Import a .dshpack produced by pack_session into this DSH installation. Restores the session log, its subagent sessions, and referenced attachments, relocates the session into the chosen workspace, and attaches it so it appears in the sidebar. Use workspace to choose the target (id, path, or exact title); defaults to the first workspace.',
     parameters: {
-      path: { type: 'string', description: 'Absolute path of the .dshpack file to import.' },
-      workspace: { type: 'string', description: 'Target workspace id, path, or exact title. Defaults to the first workspace.' },
-      dryRun: { type: 'boolean', description: 'Validate the pack and report the import plan without writing anything.' },
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Absolute path of the .dshpack file to import.' },
+        workspace: { type: 'string', description: 'Target workspace id, path, or exact title. Defaults to the first workspace.' },
+        dryRun: { type: 'boolean', description: 'Validate the pack and report the import plan without writing anything.' },
+      },
+      required: ['path'],
     },
     output: {
       schema: { type: 'object' },
