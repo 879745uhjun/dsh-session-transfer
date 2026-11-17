@@ -167,3 +167,11 @@ node docs/session-time-audit.mjs --session <会话 id>
 ```
 
 MIT License。
+
+## 从 GitHub 安装
+
+```sh
+dsh plugin --profile desktop add github:879745uhjun/dsh-session-transfer
+```
+
+装好后刷新 Web 页面。

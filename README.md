@@ -137,3 +137,11 @@ node docs/session-time-audit.mjs --session <session id>
 ```
 
 MIT License.
+
+## Install from GitHub
+
+```sh
+dsh plugin --profile desktop add github:879745uhjun/dsh-session-transfer
+```
+
+Reload the Web UI page after installing.

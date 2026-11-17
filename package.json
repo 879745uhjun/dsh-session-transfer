@@ -56,5 +56,13 @@
         "@deepseek-ai/dsh-client-locale"
       ]
     }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/879745uhjun/dsh-session-transfer.git"
+  },
+  "homepage": "https://github.com/879745uhjun/dsh-session-transfer#readme",
+  "bugs": {
+    "url": "https://github.com/879745uhjun/dsh-session-transfer/issues"
   }
 }
