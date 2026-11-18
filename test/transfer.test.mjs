@@ -222,6 +222,18 @@ function makeSource(temp) {
   persistence.seed(childHeader, [
     { type: 'session/title', seq: 0, time: 4, data: { title: '子会话' } },
   ])
+  persistence.seed({
+    type: 'session',
+    version: 4,
+    id: 'session-boxmate',
+    createdAt: 1792485281000,
+    cwd: 'D:\\source work',
+    isSeeded: false,
+    delegationDepth: 0,
+    agentPreset: 'standard',
+  }, [
+    { type: 'session/title', seq: 0, time: 5, data: { title: '盒友会话' } },
+  ])
   return {
     persistence,
     attachments,
@@ -453,5 +465,186 @@ test('refuses to overwrite an image object whose content differs from its digest
       () => importer.importPack({ path: packPath, workspace: 'ws' }),
       (error) => error instanceof TransferError && error.code === 'TRANSFER_ATTACHMENT',
     )
+  })
+})
+
+/** In-memory boxes bridge used by the whole-box tests. */
+class FakeBoxes {
+  constructor(state = { boxes: [], memberships: {}, pins: {} }) {
+    this.current = structuredClone(state)
+    this.created = []
+    this.assigned = []
+    this.sequence = 0
+  }
+
+  async state() {
+    return structuredClone(this.current)
+  }
+
+  async create({ name, color, parentId, header }) {
+    const id = `box-${++this.sequence}`
+    this.current.boxes.push({ id, name, parentId: parentId ?? null, color: color ?? 'blue', order: 0, collapsed: false, ...(header === undefined ? {} : { header }) })
+    this.created.push({ id, name, parentId: parentId ?? null })
+    return id
+  }
+
+  async assign(sessionId, boxIds) {
+    this.assigned.push({ sessionId, boxIds })
+    this.current.memberships[sessionId] = [...boxIds]
+  }
+}
+
+function makeBoxSource(temp) {
+  const source = makeSource(temp)
+  const workspaceRegistry = {
+    list: () => [{ id: 'ws-source', title: 'source', path: 'D:\\source work', sessionIds: ['session-root', 'session-boxmate'] }],
+    get: () => undefined,
+  }
+  const ctx = fakeCtx({
+    sessionPersistence: source.persistence,
+    attachments: source.attachments,
+    sessionQuery: fakeSessionQuery(source.persistence),
+    workspaceRegistry,
+  })
+  return { ...source, ctx }
+}
+
+function boxState() {
+  return {
+    boxes: [{ id: 'box-1', name: '插件制作', color: 'purple', order: 2, collapsed: false, parentId: null, header: { count: true } }],
+    memberships: { 'session-root': ['box-1'], 'session-boxmate': ['box-1'] },
+    pins: { 'box-1': ['session-boxmate'] },
+  }
+}
+
+test('exports a whole box as a v2 pack with its descriptor', async () => {
+  await withTempDir(async (temp) => {
+    const source = makeBoxSource(temp)
+    const exporter = new SessionTransfer({
+      ctx: source.ctx,
+      dshHome: join(temp, 'home-a'),
+      version: '1.1.0',
+      boxesClient: new FakeBoxes(boxState()),
+    })
+    const packPath = join(temp, 'box.dshpack')
+    const exported = await exporter.exportBox({ box: 'box-1', destination: packPath, includeDescendants: true })
+    assert.equal(exported.ok, true)
+    assert.deepEqual(exported.roots, ['session-boxmate', 'session-root'])
+    const archive = new ZipReader(packPath)
+    const manifest = JSON.parse(archive.readText(MANIFEST_NAME))
+    archive.close()
+    assert.equal(manifest.packVersion, 2)
+    assert.deepEqual(manifest.roots, ['session-boxmate', 'session-root'])
+    assert.equal(manifest.box.name, '插件制作')
+    assert.equal(manifest.box.color, 'purple')
+    assert.deepEqual(manifest.box.pinned, ['session-boxmate'])
+    assert.equal(manifest.sessions.length, 3)
+  })
+})
+
+test('imports a v2 box pack, assigns every new id, and notes pins', async () => {
+  await withTempDir(async (temp) => {
+    const source = makeBoxSource(temp)
+    const exporter = new SessionTransfer({
+      ctx: source.ctx,
+      dshHome: join(temp, 'home-a'),
+      version: '1.1.0',
+      boxesClient: new FakeBoxes(boxState()),
+    })
+    const packPath = join(temp, 'box.dshpack')
+    await exporter.exportBox({ box: '插件制作', destination: packPath })
+
+    const targetBoxes = new FakeBoxes()
+    const targetPersistence = new FakePersistence()
+    const workspace = fakeWorkspace('ws', 'target', 'D:\\target ws')
+    const importer = new SessionTransfer({
+      ctx: fakeCtx({
+        sessionPersistence: targetPersistence,
+        attachments: new FakeAttachments(join(temp, 'target-att')),
+        workspaceRegistry: { list: () => [workspace], get: () => workspace },
+      }),
+      dshHome: join(temp, 'home-b'),
+      boxesClient: targetBoxes,
+    })
+    const imported = await importer.importPack({ path: packPath, workspace: 'ws', boxMode: 'reuse' })
+    assert.equal(imported.ok, true)
+    assert.equal(imported.roots.length, 2)
+    assert.equal(workspace.sessionIds.length, 2)
+    assert.equal(imported.box.available, true)
+    assert.equal(imported.box.counts.create, 1)
+    assert.equal(imported.boxResult.ok, true)
+    assert.equal(imported.boxResult.results.length, 2)
+    assert.ok(imported.boxResult.results.every((row) => row.ok))
+    assert.ok(imported.warnings.includes('置顶顺序未迁移'))
+    assert.deepEqual(targetBoxes.created.map((row) => row.name), ['插件制作'])
+    assert.equal(targetBoxes.assigned.length, 2)
+    assert.ok(targetBoxes.assigned.every((row) => row.boxIds[0] === 'box-1'))
+  })
+})
+
+test('copy mode creates a suffixed box and leaves the original untouched', async () => {
+  await withTempDir(async (temp) => {
+    const source = makeBoxSource(temp)
+    const exporter = new SessionTransfer({
+      ctx: source.ctx,
+      dshHome: join(temp, 'home-a'),
+      version: '1.1.0',
+      boxesClient: new FakeBoxes(boxState()),
+    })
+    const packPath = join(temp, 'box.dshpack')
+    await exporter.exportBox({ box: 'box-1', destination: packPath })
+
+    const targetBoxes = new FakeBoxes({
+      boxes: [{ id: 'existing', name: '插件制作', color: 'red', order: 9, collapsed: true, parentId: null }],
+      memberships: {},
+      pins: {},
+    })
+    const workspace = fakeWorkspace('ws', 'target', 'D:\\target ws')
+    const importer = new SessionTransfer({
+      ctx: fakeCtx({
+        sessionPersistence: new FakePersistence(),
+        attachments: new FakeAttachments(join(temp, 'target-att')),
+        workspaceRegistry: { list: () => [workspace], get: () => workspace },
+      }),
+      dshHome: join(temp, 'home-b'),
+      boxesClient: targetBoxes,
+    })
+    const imported = await importer.importPack({ path: packPath, workspace: 'ws', boxMode: 'copy' })
+    assert.equal(imported.box.mode, 'copy')
+    assert.deepEqual(targetBoxes.created.map((row) => row.name), ['插件制作（导入）'])
+    const existing = targetBoxes.current.boxes.find((box) => box.id === 'existing')
+    assert.equal(existing.color, 'red')
+    assert.equal(existing.order, 9)
+    assert.equal(existing.collapsed, true)
+  })
+})
+
+test('a v2 pack still imports when the boxes bridge is unavailable', async () => {
+  await withTempDir(async (temp) => {
+    const source = makeBoxSource(temp)
+    const exporter = new SessionTransfer({
+      ctx: source.ctx,
+      dshHome: join(temp, 'home-a'),
+      version: '1.1.0',
+      boxesClient: new FakeBoxes(boxState()),
+    })
+    const packPath = join(temp, 'box.dshpack')
+    await exporter.exportBox({ box: 'box-1', destination: packPath })
+
+    const workspace = fakeWorkspace('ws', 'target', 'D:\\target ws')
+    const importer = new SessionTransfer({
+      ctx: fakeCtx({
+        sessionPersistence: new FakePersistence(),
+        attachments: new FakeAttachments(join(temp, 'target-att')),
+        workspaceRegistry: { list: () => [workspace], get: () => workspace },
+      }),
+      dshHome: join(temp, 'home-b'),
+    })
+    const imported = await importer.importPack({ path: packPath, workspace: 'ws' })
+    assert.equal(imported.ok, true)
+    assert.equal(imported.box.available, false)
+    assert.ok(imported.box.counts.skip >= 1)
+    assert.ok(imported.warnings.some((warning) => warning.includes('未归盒')))
+    assert.equal(workspace.sessionIds.length, 2)
   })
 })

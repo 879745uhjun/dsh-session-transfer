@@ -52,6 +52,14 @@ pack_session({ sessionId: "session-...", path: "D:\\tmp\\session.dshpack" })
 
 `sessionId` defaults to the calling session. `path` must stay inside the DSH home or a registered workspace; when omitted the file lands in `~/.dsh/session-packs/`.
 
+### Whole-box packs (1.1.0)
+
+Session menu → **Pack its box…** (a picker appears when the session sits in several boxes), or the `pack_box` tool. A box pack is a `.dshpack` v2 that also carries the box name/color/order/collapse/header, direct child boxes, and member order.
+
+Importing one shows a box plan first: a same-name box (name + parent) is **reused** without touching its color/order/header, or choose **New copy** to create one suffixed 「（导入）」. Boxes are restored through the boxes plugin's public route; transfer never writes its data file. If boxes is unreachable the sessions still import and the result says they were not boxed. A failed assignment never rolls back sessions, and pinned order is not migrated (reported).
+
+Old 1.0.x builds reject v2 with a clear "layout newer than this plugin reads" error before writing anything.
+
 ### Import (target machine)
 
 1. Copy the `.dshpack` over;

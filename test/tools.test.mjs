@@ -7,7 +7,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { createImportTool, createPackTool } from '../index.js'
+import { createImportTool, createPackBoxTool, createPackTool } from '../index.js'
 
 /** The factories only use `transfer` inside execute, so a stub is enough here. */
 const noop = () => {}
@@ -40,4 +40,13 @@ test('unpack_session schema is an object root with path required', () => {
   assert.equal(tool.name, 'unpack_session')
   assertObjectRoot(tool)
   assert.deepEqual(tool.parameters.required, ['path'])
+  assert.deepEqual(Object.keys(tool.parameters.properties).sort(), ['boxMode', 'dryRun', 'path', 'workspace'])
+})
+
+test('pack_box schema is an object root with box required', () => {
+  const tool = createPackBoxTool({}, noop)
+  assert.equal(tool.name, 'pack_box')
+  assertObjectRoot(tool)
+  assert.deepEqual(tool.parameters.required, ['box'])
+  assert.deepEqual(Object.keys(tool.parameters.properties).sort(), ['box', 'includeDescendants', 'path'])
 })

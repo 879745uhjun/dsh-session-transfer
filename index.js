@@ -221,6 +221,55 @@ export function createPackTool(transfer, log) {
   }
 }
 
+/** The `pack_box` agent tool: one whole box as a layout-v2 pack. */
+export function createPackBoxTool(transfer, log) {
+  return {
+    name: 'pack_box',
+    description: 'Package every session in one sidebar box (conversation, tool history, subagent sessions, and referenced images/files) into a portable .dshpack, together with the box name/color/order and any direct child boxes. Use this to move a whole box to another DSH installation; unpack_session restores the sessions and places them back into the same box. The box is identified by id or exact name.',
+    parameters: {
+      type: 'object',
+      properties: {
+        box: { type: 'string', description: 'Box id or exact box name.' },
+        path: { type: 'string', description: 'Absolute destination .dshpack path. Defaults to a folder under the DSH home; must be inside the DSH home or a registered workspace.' },
+        includeDescendants: { type: 'boolean', description: 'Include subagent sessions spawned by the box members. Defaults to true.' },
+      },
+      required: ['box'],
+    },
+    output: {
+      schema: { type: 'object' },
+      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
+    },
+    async execute(args) {
+      try {
+        const selector = typeof args?.box === 'string' ? args.box.trim() : ''
+        if (selector === '') return { ok: false, error: 'box is required' }
+        const explicit = typeof args?.path === 'string' && args.path.trim() !== '' ? resolve(args.path.trim()) : undefined
+        const ensureWritablePath = (target) => {
+          const inHome = isInside(transfer.dshHome, target)
+          const inWorkspace = transfer.listWorkspaces().some((workspace) => isInside(workspace.path, target))
+          if (!inHome && !inWorkspace) throw new TransferError('导出路径必须在 DSH 目录或已注册的工作区内', { code: 'TRANSFER_INPUT' })
+        }
+        const staging = join(transfer.packsDir, `.export-${randomUUID()}.dshpack`)
+        const result = await transfer.exportBox({
+          box: selector,
+          includeDescendants: args?.includeDescendants !== false,
+          destination: explicit ?? staging,
+          ensureWritablePath,
+        })
+        if (explicit === undefined) {
+          const finalPath = await uniquePath(transfer.packsDir, packFilename(result.box?.name ?? selector, result.box?.id ?? selector))
+          await rename(staging, finalPath)
+          result.path = finalPath
+        }
+        return result
+      } catch (error) {
+        if (!(error instanceof TransferError)) log('pack_box failed', error)
+        return { ok: false, error: error instanceof Error ? error.message : String(error) }
+      }
+    },
+  }
+}
+
 /** The `unpack_session` agent tool. */
 export function createImportTool(transfer, log) {
   return {
@@ -232,6 +281,7 @@ export function createImportTool(transfer, log) {
         path: { type: 'string', description: 'Absolute path of the .dshpack file to import.' },
         workspace: { type: 'string', description: 'Target workspace id, path, or exact title. Defaults to the first workspace.' },
         dryRun: { type: 'boolean', description: 'Validate the pack and report the import plan without writing anything.' },
+        boxMode: { type: 'string', enum: ['reuse', 'copy', 'skip'], description: 'For a whole-box pack: reuse a same-name box (default), create a suffixed copy, or import the sessions without assigning any box.' },
       },
       required: ['path'],
     },
@@ -246,6 +296,7 @@ export function createImportTool(transfer, log) {
           path: resolve(args.path.trim()),
           workspace: typeof args?.workspace === 'string' ? args.workspace.trim() : undefined,
           dryRun: args?.dryRun === true,
+          boxMode: args?.boxMode === 'copy' || args?.boxMode === 'skip' ? args.boxMode : 'reuse',
         })
       } catch (error) {
         if (!(error instanceof TransferError)) log('unpack_session failed', error)
@@ -265,6 +316,7 @@ export function apply(ctx) {
   const transfer = new SessionTransfer({ ctx, log, version: VERSION, dshHome })
 
   ctx.effect(() => ctx.tools.register(createPackTool(transfer, log)), 'session-transfer: pack tool')
+  ctx.effect(() => ctx.tools.register(createPackBoxTool(transfer, log)), 'session-transfer: pack box tool')
   ctx.effect(() => ctx.tools.register(createImportTool(transfer, log)), 'session-transfer: import tool')
 
   // Deployments without a web server (TUI, headless) still get both tools.
@@ -283,6 +335,40 @@ export function apply(ctx) {
             }
             const url = urlOf(request)
             const sessionId = url?.searchParams.get('sessionId') ?? ''
+            const boxSelector = (url?.searchParams.get('boxId') ?? url?.searchParams.get('box') ?? '').trim()
+            if (boxSelector !== '' && request.method === 'GET') {
+              const staging = join(transfer.tmpDir, `export-${randomUUID()}.dshpack`)
+              const exported = await transfer.exportBox({
+                box: boxSelector,
+                includeDescendants: url?.searchParams.get('descendants') !== '0',
+                destination: staging,
+              })
+              let bytes
+              try {
+                bytes = (await stat(staging)).size
+              } catch {
+                bytes = undefined
+              }
+              const boxName = exported.box?.name ?? boxSelector
+              const filename = packFilename(boxName, exported.box?.id ?? boxSelector)
+              response.writeHead(200, {
+                'content-type': 'application/zip',
+                'content-disposition': contentDisposition(filename),
+                'cache-control': 'no-store',
+                ...(bytes === undefined ? {} : { 'content-length': bytes }),
+              })
+              try {
+                await transfer.sendFile(staging, response)
+              } finally {
+                await rm(staging, { force: true }).catch(() => {})
+              }
+              return
+            }
+            if (boxSelector !== '' && request.method === 'HEAD') {
+              response.writeHead(204, { 'cache-control': 'no-store' })
+              response.end()
+              return
+            }
             if (sessionId.length === 0 || sessionId.length > MAX_SESSION_ID_LENGTH) {
               return sendJson(response, 400, { ok: false, error: 'sessionId is required' })
             }
@@ -372,7 +458,13 @@ export function apply(ctx) {
             staging = join(transfer.tmpDir, `inspect-${token}.dshpack`)
             const bytes = await receiveToFile(request, staging, MAX_PACK_BYTES)
             if (bytes === 0) throw new TransferError('上传的会话包是空的', { code: 'TRANSFER_INPUT' })
-            const plan = await transfer.importPack({ path: staging, workspace: workspaceId, dryRun: true })
+            const boxMode = url?.searchParams.get('boxMode')
+            const plan = await transfer.importPack({
+              path: staging,
+              workspace: workspaceId,
+              dryRun: true,
+              boxMode: boxMode === 'copy' || boxMode === 'skip' ? boxMode : 'reuse',
+            })
             staged.set(token, { path: staging, createdAt: Date.now() })
             while (staged.size > MAX_STAGED) {
               const [oldestToken, oldest] = [...staged].sort((left, right) => left[1].createdAt - right[1].createdAt)[0]
@@ -415,7 +507,12 @@ export function apply(ctx) {
               const bytes = await receiveToFile(request, staging, MAX_PACK_BYTES)
               if (bytes === 0) throw new TransferError('上传的会话包是空的', { code: 'TRANSFER_INPUT' })
             }
-            const result = await transfer.importPack({ path: staging, workspace: workspaceId })
+            const boxMode = url?.searchParams.get('boxMode')
+            const result = await transfer.importPack({
+              path: staging,
+              workspace: workspaceId,
+              boxMode: boxMode === 'copy' || boxMode === 'skip' ? boxMode : 'reuse',
+            })
             sendJson(response, 200, result)
           } catch (error) {
             if (!(error instanceof TransferError)) log('import route failed', error)

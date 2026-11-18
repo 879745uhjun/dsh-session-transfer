@@ -27,6 +27,21 @@ window.__ModuleLoader__.load({
 
     const EN = {
       'menu.pack': 'Pack session…',
+      'menu.packBox': 'Pack its box…',
+      'box.pick.title': 'Pack the whole box',
+      'box.pick.hint': 'This session sits in several boxes. Pick one to pack every session in it, including its sub-boxes.',
+      'box.pick.cancel': 'Cancel',
+      'box.none': 'This session is not in any box.',
+      'box.loadFailed': 'Could not read boxes',
+      'plan.box': 'Box',
+      'plan.boxUnavailable': 'Sessions will import without a box: {reason}',
+      'plan.boxCounts': '{reuse} reused / {create} new / {skip} skipped',
+      'plan.boxMode': 'Same-name box',
+      'plan.boxReuse': 'Reuse it',
+      'plan.boxCopy': 'New copy',
+      'plan.boxCopyName': 'Will create 「{name}」',
+      'result.box': 'Assigned to the box: {ok}/{total} sessions',
+      'result.boxFailed': 'Box assignment failed (sessions were kept): {error}',
       'footer.import': 'Import session pack',
       'footer.import.short': 'Import',
       'dialog.title': 'Import a session pack',
@@ -93,6 +108,21 @@ window.__ModuleLoader__.load({
 
     const ZH = {
       'menu.pack': '打包会话…',
+      'menu.packBox': '打包所在盒子…',
+      'box.pick.title': '打包整个盒子',
+      'box.pick.hint': '这个会话在多个盒子里，选一个盒子打包（含盒内所有会话和直接子盒）。',
+      'box.pick.cancel': '取消',
+      'box.none': '这个会话不在任何盒子里',
+      'box.loadFailed': '读取盒子失败',
+      'plan.box': '盒子',
+      'plan.boxUnavailable': '将导入但不归盒：{reason}',
+      'plan.boxCounts': '复用 {reuse} 个 / 新建 {create} 个 / 跳过 {skip} 个',
+      'plan.boxMode': '同名盒处理',
+      'plan.boxReuse': '复用同名盒',
+      'plan.boxCopy': '新建副本',
+      'plan.boxCopyName': '将新建「{name}」',
+      'result.box': '已归入盒子：{ok}/{total} 个会话成功',
+      'result.boxFailed': '归盒失败（会话已导入）：{error}',
       'footer.import': '导入会话包',
       'footer.import.short': '导入',
       'dialog.title': '导入会话包',
@@ -187,6 +217,7 @@ window.__ModuleLoader__.load({
       workspaces: null,
       workspaceId: '',
       phase: 'idle', // idle | inspecting | planned | uploading | done | failed
+      boxMode: 'reuse',
       plan: null,
       token: null,
       error: null, // { code, message }
@@ -195,7 +226,9 @@ window.__ModuleLoader__.load({
       workspaceMessage: null,
     }
 
+    const EMPTY_BOX_PICK = { open: false, sessionId: '', title: '', boxes: [] }
     const dialogStore = createStore(EMPTY_DIALOG)
+    const boxPickStore = createStore(EMPTY_BOX_PICK)
     const packStore = createStore({ status: 'idle', title: '', sessionId: '', received: 0, total: 0, error: null })
 
     const abortable = { current: null }
@@ -290,19 +323,21 @@ window.__ModuleLoader__.load({
      * Pack download: fetch the streamed ZIP, then hand it to the browser
      * ------------------------------------------------------------------ */
 
-    async function packSession(sessionId, title) {
-      if (typeof sessionId !== 'string' || sessionId === '') return
+    async function packSession(target, title) {
+      const boxId = target !== null && typeof target === 'object' && typeof target.boxId === 'string' ? target.boxId : undefined
+      const sessionId = boxId === undefined ? (typeof target === 'string' ? target : target?.sessionId) : undefined
+      if (boxId === undefined && (typeof sessionId !== 'string' || sessionId === '')) return
       abortable.current?.abort()
       const controller = new AbortController()
       abortable.current = controller
       packStore.set({ status: 'preparing', title: title ?? '', sessionId, received: 0, total: 0, error: null })
       try {
-        const query = new URLSearchParams({ sessionId })
-        if (typeof title === 'string' && title.trim() !== '') query.set('title', title.trim())
+        const query = boxId === undefined ? new URLSearchParams({ sessionId }) : new URLSearchParams({ boxId })
+        if (boxId === undefined && typeof title === 'string' && title.trim() !== '') query.set('title', title.trim())
         const response = await fetch(`${ROUTE_EXPORT}?${query.toString()}`, { signal: controller.signal })
         if (!response.ok) throw await packFailure(response)
         const total = Number(response.headers.get('content-length') ?? 0)
-        const filename = filenameOf(response, sessionId, title)
+        const filename = filenameOf(response, sessionId ?? boxId ?? 'pack', title)
         const chunks = []
         let received = 0
         if (response.body !== null && typeof response.body.getReader === 'function') {
@@ -368,6 +403,34 @@ window.__ModuleLoader__.load({
       return `${base}.dshpack`
     }
 
+    /** Boxes containing one session, read from the boxes plugin's public route. */
+    async function boxesForSession(sessionId) {
+      const response = await fetch('/session-boxes', { headers: { accept: 'application/json' }, cache: 'no-store' })
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      const payload = await response.json()
+      const state = payload?.state
+      const boxIds = Array.isArray(state?.memberships?.[sessionId]) ? state.memberships[sessionId] : []
+      return (Array.isArray(state?.boxes) ? state.boxes : []).filter((box) => boxIds.includes(box.id))
+    }
+
+    /** Pack the whole box this session belongs to (picker when it sits in several). */
+    async function packBoxForSession(sessionId, displayTitle) {
+      try {
+        const boxes = await boxesForSession(sessionId)
+        if (boxes.length === 0) {
+          packStore.set({ status: 'failed', title: displayTitle ?? '', sessionId, received: 0, total: 0, error: '这个会话不在任何盒子里', code: 'BOX_NONE' })
+          return
+        }
+        if (boxes.length === 1) {
+          await packSession({ boxId: boxes[0].id }, boxes[0].name)
+          return
+        }
+        boxPickStore.set({ open: true, sessionId, title: displayTitle ?? '', boxes })
+      } catch (error) {
+        packStore.set({ status: 'failed', title: displayTitle ?? '', sessionId, received: 0, total: 0, error: `读取盒子失败：${messageOf(error)}`, code: 'BOX_ERROR' })
+      }
+    }
+
     /* ------------------------------------------------------------------ *
      * Import dialog: preflight, confirm, import
      * ------------------------------------------------------------------ */
@@ -403,7 +466,8 @@ window.__ModuleLoader__.load({
       const sequence = ++inspectSequence
       dialogStore.set({ ...state, phase: 'inspecting', error: null, result: null })
       try {
-        const response = await fetch(`${ROUTE_INSPECT}?workspaceId=${encodeURIComponent(state.workspaceId)}`, {
+        const inspectQuery = new URLSearchParams({ workspaceId: state.workspaceId, boxMode: state.boxMode })
+        const response = await fetch(`${ROUTE_INSPECT}?${inspectQuery.toString()}`, {
           method: 'POST',
           headers: { 'content-type': 'application/octet-stream' },
           body: file,
@@ -424,7 +488,7 @@ window.__ModuleLoader__.load({
       if (state.token === null || state.phase !== 'planned') return
       dialogStore.set({ ...state, phase: 'uploading', error: null })
       try {
-        const query = new URLSearchParams({ token: state.token })
+        const query = new URLSearchParams({ token: state.token, boxMode: state.boxMode })
         if (state.workspaceId !== '') query.set('workspaceId', state.workspaceId)
         const response = await fetch(`${ROUTE_IMPORT}?${query.toString()}`, { method: 'POST' })
         if (!response.ok) throw await failureOf(response, t)
@@ -485,6 +549,61 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /** Menu item: pack the whole box this session belongs to. */
+    function SessionPackBoxMenuItem({ sessionId, displayTitle, useMenuOpenState, t }) {
+      const useMenu = typeof useMenuOpenState === 'function' ? useMenuOpenState : () => [false, () => {}]
+      const [, setMenuOpen] = useMenu()
+      return h('button', {
+        type: 'button',
+        role: 'menuitem',
+        className: 'dst-menuItem',
+        onClick: () => {
+          setMenuOpen(false)
+          void packBoxForSession(sessionId, displayTitle)
+        },
+      },
+        h('span', { className: 'dst-menuItem__icon' }, h(BoxIcon, {})),
+        h('span', { className: 'dst-menuItem__label' }, t('menu.packBox')),
+      )
+    }
+
+    /** Dialog shown when the session sits in more than one box. */
+    function BoxPicker({ t }) {
+      const state = useStore(boxPickStore)
+      if (!state.open) return null
+      const close = () => boxPickStore.set(EMPTY_BOX_PICK)
+      return h('div', {
+        className: 'dst-backdrop',
+        role: 'presentation',
+        onClick: (event) => {
+          if (event.target === event.currentTarget) close()
+        },
+      },
+        h('div', { className: 'dst-dialog dst-boxPick', role: 'dialog', 'aria-modal': 'true', 'aria-label': t('box.pick.title') },
+          h('div', { className: 'dst-dialog__head' },
+            h('span', { className: 'dst-dialog__title' }, t('box.pick.title')),
+            h('button', { type: 'button', className: 'dst-close', title: t('dialog.close'), 'aria-label': t('dialog.close'), onClick: close }, '×'),
+          ),
+          h('p', { className: 'dst-dialog__hint' }, t('box.pick.hint')),
+          h('div', { className: 'dst-boxPickList' }, state.boxes.map((box) => h('button', {
+            key: box.id,
+            type: 'button',
+            className: 'dst-boxPickItem',
+            onClick: () => {
+              close()
+              void packSession({ boxId: box.id }, box.name)
+            },
+          },
+            h('span', { className: `dst-boxDot is-${box.color ?? 'blue'}` }),
+            h('span', { className: 'dst-boxPickName' }, box.name),
+          ))),
+          h('div', { className: 'dst-dialog__actions' },
+            h('button', { type: 'button', className: 'dst-button is-ghost', onClick: close }, t('box.pick.cancel')),
+          ),
+        ),
+      )
+    }
+
     /** Sidebar footer: open the import dialog. */
     function ImportFooterAction({ wide, openImport, t }) {
       return h('button', {
@@ -540,8 +659,9 @@ window.__ModuleLoader__.load({
     }
 
     /** Summary of what the preflight found, shown before any write happens. */
-    function PlanCard({ plan, t }) {
+    function PlanCard({ plan, boxMode, onBoxMode, t }) {
       const sessions = Array.isArray(plan?.sessions) ? plan.sessions : []
+      const box = plan?.box
       const copies = sessions.filter((row) => row.id !== row.originalId).length
       const source = plan?.source ?? {}
       const sourceParts = []
@@ -556,6 +676,34 @@ window.__ModuleLoader__.load({
           h(PlanRow, { label: t('plan.attachments'), value: String(plan?.attachments ?? 0) }),
           h(PlanRow, { label: t('plan.target'), value: String(plan?.workspacePath ?? '') }),
           sourceParts.length > 0 && h(PlanRow, { label: t('plan.source'), value: sourceParts.join(' · ') }),
+        ),
+        box !== undefined && h('div', { className: 'dst-planBox' },
+          h('div', { className: 'dst-planBox__head' }, `${t('plan.box')} · ${box.name === '' ? '—' : box.name}`),
+          box.available === false
+            ? h('div', { className: 'dst-planBox__note' }, t('plan.boxUnavailable', { reason: box.reason ?? '' }))
+            : h('div', { className: 'dst-planBox__note' }, t('plan.boxCounts', {
+              reuse: String(box.counts?.reuse ?? 0),
+              create: String(box.counts?.create ?? 0),
+              skip: String(box.counts?.skip ?? 0),
+            })),
+          box.available !== false && h('div', { className: 'dst-planBox__mode' },
+            h('span', { className: 'dst-planBox__modeLabel' }, t('plan.boxMode')),
+            h('button', {
+              type: 'button',
+              className: boxMode === 'reuse' ? 'dst-chip is-on' : 'dst-chip',
+              'aria-pressed': boxMode === 'reuse',
+              onClick: () => onBoxMode('reuse'),
+            }, t('plan.boxReuse')),
+            h('button', {
+              type: 'button',
+              className: boxMode === 'copy' ? 'dst-chip is-on' : 'dst-chip',
+              'aria-pressed': boxMode === 'copy',
+              onClick: () => onBoxMode('copy'),
+            }, t('plan.boxCopy')),
+          ),
+          box.available !== false && boxMode === 'copy' && h('div', { className: 'dst-planBox__note' },
+            t('plan.boxCopyName', { name: `${box.name}（导入）` }),
+          ),
         ),
         Array.isArray(plan?.warnings) && plan.warnings.length > 0 && h('div', { className: 'dst-warnings' },
           h('div', { className: 'dst-warnings__title' }, t('warn.title')),
@@ -718,6 +866,15 @@ window.__ModuleLoader__.load({
               h('div', { className: 'dst-result__title' }, `✓ ${t('dialog.success.title')}`),
               state.result?.title ? h('div', { className: 'dst-result__session' }, state.result.title) : null,
               h('div', { className: 'dst-result__text' }, t('dialog.success.hint', { workspace: state.result?.workspaceTitle ?? '' })),
+              state.result?.boxResult?.ok === true && h('div', { className: 'dst-result__text' },
+                t('result.box', {
+                  ok: String(state.result.boxResult.results.filter((row) => row.ok).length),
+                  total: String(state.result.boxResult.results.length),
+                }),
+              ),
+              state.result?.boxResult?.ok === false && h('div', { className: 'dst-result__text is-warn' },
+                t('result.boxFailed', { error: state.result.boxResult.error ?? '' }),
+              ),
               Array.isArray(state.result?.warnings) && state.result.warnings.length > 0 && h('div', { className: 'dst-warnings' },
                 h('div', { className: 'dst-warnings__title' }, t('warn.title')),
                 h('ul', {}, state.result.warnings.map((warning, index) => h('li', { key: index }, warning))),
@@ -800,7 +957,12 @@ window.__ModuleLoader__.load({
                 h('span', { className: 'dst-spinner' }),
                 h('span', {}, t('dialog.inspecting')),
               ),
-              planned && h(PlanCard, { plan: state.plan, t }),
+              planned && h(PlanCard, {
+                plan: state.plan,
+                boxMode: state.boxMode,
+                onBoxMode: (mode) => dialogStore.set({ ...dialogStore.get(), boxMode: mode }),
+                t,
+              }),
               busy && h('div', { className: 'dst-working' },
                 h('span', { className: 'dst-spinner' }),
                 h('span', {}, t('dialog.working')),
@@ -886,6 +1048,25 @@ window.__ModuleLoader__.load({
       '.dst-plan__row{display:flex;gap:10px;font-size:12px;line-height:1.45}',
       '.dst-plan__key{flex:none;width:64px;color:var(--dsw-alias-label-secondary)}',
       '.dst-plan__value{flex:1;min-width:0;word-break:break-word}',
+      '.dst-planBox{margin-top:10px;padding-top:8px;border-top:1px solid var(--dsw-alias-border-l2)}',
+      '.dst-planBox__head{font-size:12px;font-weight:600}',
+      '.dst-planBox__note{margin-top:3px;font-size:11px;color:var(--dsw-alias-label-secondary);word-break:break-word}',
+      '.dst-planBox__mode{display:flex;align-items:center;gap:6px;margin-top:8px;flex-wrap:wrap}',
+      '.dst-planBox__modeLabel{font-size:11px;color:var(--dsw-alias-label-secondary)}',
+      '.dst-chip{height:24px;padding:0 8px;border-radius:999px;border:1px solid var(--dsw-alias-border-l2);background:transparent;',
+      'color:var(--dsw-alias-label-secondary);font:inherit;font-size:11px;cursor:pointer}',
+      '.dst-chip.is-on{border-color:var(--dsw-alias-brand-primary);background:color-mix(in srgb, var(--dsw-alias-brand-primary) 14%, transparent);',
+      'color:var(--dsw-alias-brand-primary);font-weight:600}',
+      '.dst-boxPickList{display:flex;flex-direction:column;gap:4px;max-height:40vh;overflow:auto}',
+      '.dst-boxPickItem{display:flex;align-items:center;gap:8px;width:100%;padding:7px 9px;border:1px solid var(--dsw-alias-border-l2);',
+      'border-radius:8px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);font:inherit;font-size:12px;cursor:pointer;text-align:left}',
+      '.dst-boxPickItem:hover{border-color:var(--dsw-alias-brand-primary)}',
+      '.dst-boxPickName{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+      '.dst-boxDot{width:8px;height:8px;border-radius:50%;flex:none;background:var(--dsw-alias-label-secondary)}',
+      '.dst-boxDot.is-blue{background:#4C8DFF}.dst-boxDot.is-green{background:#3FB950}.dst-boxDot.is-amber{background:#D29922}',
+      '.dst-boxDot.is-red{background:#F85149}.dst-boxDot.is-purple{background:#A371F7}.dst-boxDot.is-pink{background:#DB61A2}',
+      '.dst-boxDot.is-cyan{background:#39C5CF}.dst-boxDot.is-gray{background:#8B949E}',
+      '.dst-result__text.is-warn{color:var(--dsw-alias-state-warn-primary)}',
       '.dst-error{margin-top:12px;padding:8px 10px;border-radius:8px;background:color-mix(in srgb, var(--dsw-alias-state-error-primary) 10%, transparent)}',
       '.dst-error__title{font-size:12px;font-weight:600;color:var(--dsw-alias-state-error-primary)}',
       '.dst-error__text{margin-top:2px;font-size:12px;white-space:pre-wrap;word-break:break-word}',
@@ -960,6 +1141,13 @@ window.__ModuleLoader__.load({
           locale: NS,
         }, SessionPackMenuItem))
 
+        ctx.slots.inject('sidebar.workspaces.session.menu.item', () => ctx.slots.register({
+          name: 'sidebar.workspaces.session.menu.item',
+          id: 'session-transfer-box-menu',
+          order: 121,
+          locale: NS,
+        }, SessionPackBoxMenuItem))
+
         ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
           name: 'sidebar.footer.action',
           id: 'session-transfer-footer',
@@ -974,6 +1162,13 @@ window.__ModuleLoader__.load({
           order: 70,
           locale: NS,
         }, PackProgressCard))
+
+        ctx.slots.inject('shell.overlay', () => ctx.slots.register({
+          name: 'shell.overlay',
+          id: 'session-transfer-box-picker',
+          order: 72,
+          locale: NS,
+        }, BoxPicker))
 
         ctx.slots.inject('shell.overlay', () => ctx.slots.register({
           name: 'shell.overlay',
