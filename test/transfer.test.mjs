@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { test } from 'node:test'
@@ -646,5 +646,58 @@ test('a v2 pack still imports when the boxes bridge is unavailable', async () =>
     assert.ok(imported.box.counts.skip >= 1)
     assert.ok(imported.warnings.some((warning) => warning.includes('未归盒')))
     assert.equal(workspace.sessionIds.length, 2)
+  })
+})
+
+test('an ASCII fallback name replaces an all-CJK Content-Disposition name', async () => {
+  const { asciiPackFilename, contentDisposition } = await import('../lib/transfer.mjs')
+  assert.equal(asciiPackFilename('会话打包', 'session-abcdef12'), 'session-abcdef12.dshpack')
+  assert.equal(asciiPackFilename('My Pack', 'session-abcdef12'), 'My Pack.dshpack')
+  const header = contentDisposition('会话打包.dshpack', asciiPackFilename('会话打包', 'session-abcdef12'))
+  assert.ok(header.includes('filename="session-abcdef12.dshpack"'))
+  assert.ok(header.includes("filename*=UTF-8''"))
+})
+
+test('createWorkspace creates the directory and calls the registry', async () => {
+  await withTempDir(async (temp) => {
+    const created = []
+    const registry = {
+      create: async (path, title) => {
+        created.push({ path, title })
+        return { id: 'ws-new', title: title ?? 'new', path }
+      },
+    }
+    const transfer = new SessionTransfer({ ctx: fakeCtx({ workspaceRegistry: registry }), dshHome: join(temp, 'home') })
+    const target = join(temp, 'fresh workspace')
+    const workspace = await transfer.createWorkspace(target, '测试工作区')
+    assert.equal(workspace.id, 'ws-new')
+    assert.equal((await stat(target)).isDirectory(), true)
+    assert.deepEqual(created, [{ path: target, title: '测试工作区' }])
+    await assert.rejects(() => transfer.createWorkspace('relative/path'), /绝对路径/)
+  })
+})
+
+test('importPack reports attachment, session, and completion progress', async () => {
+  await withTempDir(async (temp) => {
+    const source = makeSource(temp)
+    const packPath = join(temp, 'pack.dshpack')
+    const exporter = new SessionTransfer({ ctx: source.ctx, dshHome: join(temp, 'home-a'), version: '1.2.0' })
+    await exporter.exportPack({ sessionId: 'session-root', includeDescendants: true, destination: packPath })
+
+    const workspace = fakeWorkspace('ws', 'target', 'D:\\target ws')
+    const importer = new SessionTransfer({
+      ctx: fakeCtx({
+        sessionPersistence: new FakePersistence(),
+        attachments: new FakeAttachments(join(temp, 'target-att')),
+        workspaceRegistry: { list: () => [workspace], get: () => workspace },
+      }),
+      dshHome: join(temp, 'home-b'),
+    })
+    const phases = []
+    const imported = await importer.importPack({ path: packPath, workspace: 'ws', onProgress: (snapshot) => phases.push(snapshot) })
+    assert.equal(imported.ok, true)
+    assert.ok(phases.some((row) => row.phase === 'attachments' && row.total >= 1))
+    assert.ok(phases.some((row) => row.phase === 'sessions' && row.total === 2 && row.done === 2))
+    assert.equal(phases.at(-1).phase, 'done')
   })
 })

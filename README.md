@@ -42,7 +42,7 @@ dsh plugin --profile web add "D:\dsh-plugins\dsh-session-transfer"
 
 ### Pack (source machine)
 
-Hover a session row → `…` → **Pack session…**. A progress card reports packing and download progress; the browser saves `<session title>.dshpack`.
+Hover a session row → `…` → **Pack session…**. A progress card reports packing and download progress; the browser saves `<session title>.dshpack` (through a save dialog when supported; cancelling is not a failure).
 
 Agent equivalent:
 
@@ -64,8 +64,9 @@ Old 1.0.x builds reject v2 with a clear "layout newer than this plugin reads" er
 
 1. Copy the `.dshpack` over;
 2. Sidebar footer → **Import session pack**;
-3. Pick the target workspace and the file. DSH **preflights** the pack first and shows its title, session/event/attachment counts, the target path, the source DSH version and format, and which ids become copies or presets get replaced;
-4. Confirm with **Import**. On success, either open the session immediately or find it at the top of that workspace.
+3. Pick an existing workspace, or choose **New workspace…** and enter an absolute path to create one on the spot;
+4. Pick the file. DSH **preflights** the pack first and shows its title, session/event/attachment counts, the target path, the source DSH version and format, and which ids become copies or presets get replaced;
+5. Confirm with **Import**. The dialog then shows attachment/session/box phases streamed over SSE On success, either open the session immediately or find it at the top of that workspace.
 
 A failed preflight writes nothing; retry re-runs it. Esc closes, Enter confirms, and the dialog cannot be dismissed while an import is running. After writing, the host reads the session back and compares its content digest, so a truncated log fails loudly instead of leaving an unopenable row.
 

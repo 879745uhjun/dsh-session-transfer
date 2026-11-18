@@ -22,7 +22,7 @@ import { open, rename, rm, stat } from 'node:fs/promises'
 import { appendFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { TransferError, SessionTransfer, MAX_PACK_BYTES, packFilename, contentDisposition, isInside, resolveDshHome, detectFormatVersion } from './lib/transfer.mjs'
+import { TransferError, SessionTransfer, MAX_PACK_BYTES, packFilename, asciiPackFilename, contentDisposition, isInside, resolveDshHome, detectFormatVersion } from './lib/transfer.mjs'
 import { readFileSync } from 'node:fs'
 
 /** Cordis plugin name. */
@@ -46,6 +46,8 @@ const ROUTE_IMPORT = '/session-transfer/import'
 const ROUTE_WORKSPACES = '/session-transfer/workspaces'
 const ROUTE_INSPECT = '/session-transfer/inspect'
 const ROUTE_HEALTH = '/session-transfer/health'
+const ROUTE_WORKSPACE = '/session-transfer/workspace'
+const ROUTE_PROGRESS = '/session-transfer/progress'
 
 /** How long one preflighted upload stays staged for its import. */
 const STAGED_TTL_MS = 60 * 60 * 1000
@@ -154,6 +156,22 @@ async function receiveToFile(request, path, limit) {
     await handle.close()
   }
   return bytes
+}
+
+/** Read a bounded JSON request body. */
+async function receiveJson(request, limit) {
+  const chunks = []
+  let size = 0
+  for await (const chunk of request) {
+    size += chunk.length
+    if (size > limit) throw new TransferError('请求体过大', { code: 'TRANSFER_INPUT' })
+    chunks.push(chunk)
+  }
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString('utf8'))
+  } catch {
+    throw new TransferError('请求体不是有效 JSON', { code: 'TRANSFER_INPUT' })
+  }
 }
 
 /** A path that does not exist yet, by appending a counter before the extension. */
@@ -353,7 +371,7 @@ export function apply(ctx) {
               const filename = packFilename(boxName, exported.box?.id ?? boxSelector)
               response.writeHead(200, {
                 'content-type': 'application/zip',
-                'content-disposition': contentDisposition(filename),
+                'content-disposition': contentDisposition(filename, asciiPackFilename(boxName, exported.box?.id ?? boxSelector)),
                 'cache-control': 'no-store',
                 ...(bytes === undefined ? {} : { 'content-length': bytes }),
               })
@@ -402,7 +420,7 @@ export function apply(ctx) {
             const filename = packFilename(title, sessionId)
             response.writeHead(200, {
               'content-type': 'application/zip',
-              'content-disposition': contentDisposition(filename),
+              'content-disposition': contentDisposition(filename, asciiPackFilename(title, sessionId)),
               'cache-control': 'no-store',
               ...(bytes === undefined ? {} : { 'content-length': bytes }),
             })
@@ -421,6 +439,83 @@ export function apply(ctx) {
         },
       })
       const staged = new Map()
+      const imports = new Map()
+
+      const removeWorkspace = scope.webServer.register({
+        kind: 'exact',
+        path: ROUTE_WORKSPACE,
+        handler: async (request, response) => {
+          try {
+            if (!isAcceptableOrigin(request)) return sendJson(response, 403, { ok: false, error: 'cross-origin request refused' })
+            if (request.method !== 'POST') {
+              response.writeHead(405, { allow: 'POST', 'content-type': 'application/json; charset=utf-8' })
+              response.end(JSON.stringify({ ok: false, error: 'method not allowed' }))
+              return
+            }
+            const payload = await receiveJson(request, 8 * 1024)
+            const workspace = await transfer.createWorkspace(payload?.path, payload?.title)
+            sendJson(response, 200, { ok: true, workspace })
+          } catch (error) {
+            sendFailure(response, error, log)
+          }
+        },
+      })
+
+      const removeProgress = scope.webServer.register({
+        kind: 'exact',
+        path: ROUTE_PROGRESS,
+        handler: (request, response) => {
+          const url = urlOf(request)
+          const token = url?.searchParams.get('token') ?? ''
+          if (request.method !== 'GET' || token === '' || !imports.has(token)) {
+            return sendJson(response, 404, { ok: false, error: 'unknown progress token' })
+          }
+          response.writeHead(200, {
+            'content-type': 'text/event-stream; charset=utf-8',
+            'cache-control': 'no-store, no-transform',
+            connection: 'keep-alive',
+            'x-accel-buffering': 'no',
+          })
+          response.write('retry: 1000\n\n')
+          let closed = false
+          let last = ''
+          const finish = () => {
+            if (closed) return
+            closed = true
+            clearInterval(timer)
+            try {
+              response.end()
+            } catch {
+              /* socket already gone */
+            }
+          }
+          const tick = () => {
+            if (closed) return
+            const snapshot = imports.get(token)
+            if (snapshot === undefined) {
+              finish()
+              return
+            }
+            const serialized = JSON.stringify(snapshot)
+            if (serialized !== last) {
+              last = serialized
+              try {
+                response.write(`data: ${serialized}\n\n`)
+              } catch {
+                finish()
+                return
+              }
+            }
+            if (snapshot.phase === 'done' || snapshot.phase === 'failed') setTimeout(finish, 60).unref?.()
+          }
+          const timer = setInterval(tick, 150)
+          request.on('close', () => {
+            closed = true
+            clearInterval(timer)
+          })
+          tick()
+        },
+      })
 
       /** Drop staged uploads whose import never arrived. */
       const sweepStaged = async () => {
@@ -508,11 +603,24 @@ export function apply(ctx) {
               if (bytes === 0) throw new TransferError('上传的会话包是空的', { code: 'TRANSFER_INPUT' })
             }
             const boxMode = url?.searchParams.get('boxMode')
-            const result = await transfer.importPack({
-              path: staging,
-              workspace: workspaceId,
-              boxMode: boxMode === 'copy' || boxMode === 'skip' ? boxMode : 'reuse',
-            })
+            const progressToken = url?.searchParams.get('progressToken') ?? ''
+            const onProgress = progressToken === '' ? undefined : (snapshot) => {
+              imports.set(progressToken, { ...snapshot, updatedAt: Date.now() })
+            }
+            if (progressToken !== '') imports.set(progressToken, { phase: 'starting', done: 0, total: 0, updatedAt: Date.now() })
+            let result
+            try {
+              result = await transfer.importPack({
+                path: staging,
+                workspace: workspaceId,
+                boxMode: boxMode === 'copy' || boxMode === 'skip' ? boxMode : 'reuse',
+                onProgress,
+              })
+            } catch (error) {
+              if (progressToken !== '') imports.set(progressToken, { phase: 'failed', done: 0, total: 0, error: error instanceof Error ? error.message : String(error), updatedAt: Date.now() })
+              throw error
+            }
+            if (progressToken !== '') imports.set(progressToken, { phase: 'done', done: 1, total: 1, updatedAt: Date.now() })
             sendJson(response, 200, result)
           } catch (error) {
             if (!(error instanceof TransferError)) log('import route failed', error)
@@ -579,6 +687,8 @@ export function apply(ctx) {
         },
       })
       return () => {
+        removeProgress()
+        removeWorkspace()
         removeHealth()
         removeWorkspaces()
         removeImport()

@@ -24,6 +24,8 @@ window.__ModuleLoader__.load({
     const ROUTE_IMPORT = '/session-transfer/import'
     const ROUTE_INSPECT = '/session-transfer/inspect'
     const ROUTE_WORKSPACES = '/session-transfer/workspaces'
+    const ROUTE_WORKSPACE = '/session-transfer/workspace'
+    const ROUTE_PROGRESS = '/session-transfer/progress'
 
     const EN = {
       'menu.pack': 'Pack session…',
@@ -48,6 +50,15 @@ window.__ModuleLoader__.load({
       'dialog.hint': 'A .dshpack carries one session, its subagent sessions, and every referenced image or file. Pick the workspace the session should belong to on this computer.',
       'dialog.workspace': 'Target workspace',
       'dialog.workspace.empty': 'No workspace yet. Add one in DSH first.',
+      'dialog.workspace.new': 'New workspace…',
+      'dialog.workspace.path': 'Absolute directory for the new workspace',
+      'dialog.workspace.create': 'Create and use',
+      'dialog.workspace.creating': 'Creating…',
+      'progress.starting': 'Preparing…',
+      'progress.attachments': 'Restoring attachments {done}/{total}',
+      'progress.sessions': 'Restoring sessions {done}/{total}',
+      'progress.boxes': 'Assigning boxes…',
+      'progress.finishing': 'Finishing…',
       'dialog.file': 'Session pack',
       'dialog.choose': 'Choose a .dshpack file',
       'dialog.drop': 'or drop it here',
@@ -129,6 +140,15 @@ window.__ModuleLoader__.load({
       'dialog.hint': '一个 .dshpack 包含一个会话、它的子会话，以及引用到的图片和文件。选择这个会话在本机应归属的工作区。',
       'dialog.workspace': '目标工作区',
       'dialog.workspace.empty': '还没有工作区，请先在 DSH 里添加一个。',
+      'dialog.workspace.new': '新建工作区…',
+      'dialog.workspace.path': '新工作区的绝对路径',
+      'dialog.workspace.create': '创建并使用',
+      'dialog.workspace.creating': '正在创建…',
+      'progress.starting': '正在准备…',
+      'progress.attachments': '正在恢复附件 {done}/{total}',
+      'progress.sessions': '正在恢复会话 {done}/{total}',
+      'progress.boxes': '正在归盒…',
+      'progress.finishing': '正在收尾…',
       'dialog.file': '会话包',
       'dialog.choose': '选择 .dshpack 文件',
       'dialog.drop': '也可以拖到这里',
@@ -224,6 +244,11 @@ window.__ModuleLoader__.load({
       result: null,
       workspacesFailed: false,
       workspaceMessage: null,
+      newWorkspace: false,
+      workspacePath: '',
+      workspaceBusy: false,
+      workspaceError: null,
+      progress: null,
     }
 
     const EMPTY_BOX_PICK = { open: false, sessionId: '', title: '', boxes: [] }
@@ -319,6 +344,25 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /** One-line description of the current import phase. */
+    function progressLabel(progress, t) {
+      if (progress === null || progress === undefined) return t('dialog.working')
+      const done = String(progress.done ?? 0)
+      const total = String(progress.total ?? 0)
+      switch (progress.phase) {
+        case 'attachments':
+          return t('progress.attachments', { done, total })
+        case 'sessions':
+          return t('progress.sessions', { done, total })
+        case 'boxes':
+          return t('progress.boxes')
+        case 'done':
+          return t('progress.finishing')
+        default:
+          return t('progress.starting')
+      }
+    }
+
     /* ------------------------------------------------------------------ *
      * Pack download: fetch the streamed ZIP, then hand it to the browser
      * ------------------------------------------------------------------ */
@@ -356,15 +400,11 @@ window.__ModuleLoader__.load({
         }
         const blob = new Blob(chunks, { type: 'application/zip' })
         packStore.set({ status: 'saving', title: title ?? '', sessionId, received, total, error: null })
-        const url = URL.createObjectURL(blob)
-        const anchor = document.createElement('a')
-        anchor.href = url
-        anchor.download = filename
-        anchor.rel = 'noopener'
-        document.body.appendChild(anchor)
-        anchor.click()
-        anchor.remove()
-        setTimeout(() => URL.revokeObjectURL(url), 60_000)
+        const outcome = await saveBlob(blob, filename)
+        if (outcome === 'cancelled') {
+          packStore.set({ status: 'idle', title: '', sessionId: '', received: 0, total: 0, error: null })
+          return
+        }
         packStore.set({ status: 'done', title: title ?? '', sessionId, received, total, error: null })
         setTimeout(() => {
           if (packStore.get().status === 'done') packStore.set({ status: 'idle', title: '', sessionId: '', received: 0, total: 0, error: null })
@@ -385,6 +425,42 @@ window.__ModuleLoader__.load({
       } finally {
         if (abortable.current === controller) abortable.current = null
       }
+    }
+
+    /**
+     * Save one archive through the browser picker when available, falling back
+     * to the download manager. A cancelled picker is not a failure.
+     * @param blob - archive bytes.
+     * @param filename - suggested name.
+     * @returns `saved`, `downloaded`, or `cancelled`.
+     */
+    async function saveBlob(blob, filename) {
+      const picker = globalThis.showSaveFilePicker
+      if (typeof picker === 'function') {
+        try {
+          const handle = await picker({
+            suggestedName: filename,
+            types: [{ description: 'DSH session pack', accept: { 'application/zip': ['.dshpack'] } }],
+          })
+          const writable = await handle.createWritable()
+          await writable.write(blob)
+          await writable.close()
+          return 'saved'
+        } catch (error) {
+          if (error?.name === 'AbortError') return 'cancelled'
+          /* fall back to the download manager */
+        }
+      }
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = filename
+      anchor.rel = 'noopener'
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      setTimeout(() => URL.revokeObjectURL(url), 60_000)
+      return 'downloaded'
     }
 
     function filenameOf(response, sessionId, title) {
@@ -483,12 +559,57 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /** Create a workspace from the dialog and select it as the import target. */
+    async function createWorkspaceNow(t) {
+      const state = dialogStore.get()
+      const path = state.workspacePath.trim()
+      if (path === '') return
+      dialogStore.set({ ...state, workspaceBusy: true, workspaceError: null })
+      try {
+        const response = await fetch(ROUTE_WORKSPACE, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ path }),
+        })
+        if (!response.ok) throw await failureOf(response, t)
+        const payload = await response.json()
+        if (payload?.ok !== true) throw payloadFailure(payload, t)
+        const workspace = payload.workspace
+        const current = dialogStore.get()
+        const others = (current.workspaces ?? []).filter((row) => row.id !== workspace.id)
+        dialogStore.set({
+          ...current,
+          workspaces: [...others, workspace],
+          workspaceId: workspace.id,
+          newWorkspace: false,
+          workspaceBusy: false,
+          workspacePath: '',
+          workspaceError: null,
+        })
+      } catch (error) {
+        dialogStore.set({ ...dialogStore.get(), workspaceBusy: false, workspaceError: messageOf(error) })
+      }
+    }
+
     async function runImport(ctx, t) {
       const state = dialogStore.get()
       if (state.token === null || state.phase !== 'planned') return
-      dialogStore.set({ ...state, phase: 'uploading', error: null })
+      const progressToken = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : `p-${Date.now()}`
+      let source
+      if (typeof EventSource === 'function') {
+        source = new EventSource(`${ROUTE_PROGRESS}?token=${encodeURIComponent(progressToken)}`)
+        source.onmessage = (event) => {
+          try {
+            const snapshot = JSON.parse(event.data)
+            dialogStore.set({ ...dialogStore.get(), progress: snapshot })
+          } catch {
+            /* a malformed frame is ignored */
+          }
+        }
+      }
+      dialogStore.set({ ...state, phase: 'uploading', progress: { phase: 'starting', done: 0, total: 0 }, error: null })
       try {
-        const query = new URLSearchParams({ token: state.token, boxMode: state.boxMode })
+        const query = new URLSearchParams({ token: state.token, boxMode: state.boxMode, progressToken })
         if (state.workspaceId !== '') query.set('workspaceId', state.workspaceId)
         const response = await fetch(`${ROUTE_IMPORT}?${query.toString()}`, { method: 'POST' })
         if (!response.ok) throw await failureOf(response, t)
@@ -507,7 +628,9 @@ window.__ModuleLoader__.load({
           /* the list refreshes on the next focus anyway */
         }
       } catch (error) {
-        dialogStore.set({ ...dialogStore.get(), phase: 'failed', token: null, error: { code: error?.code, message: messageOf(error) } })
+        dialogStore.set({ ...dialogStore.get(), phase: 'failed', token: null, progress: null, error: { code: error?.code, message: messageOf(error) } })
+      } finally {
+        source?.close()
       }
     }
 
@@ -724,6 +847,9 @@ window.__ModuleLoader__.load({
       const inspecting = state.phase === 'inspecting'
       const done = state.phase === 'done'
       const failed = state.phase === 'failed'
+      const progressTotal = Number.isFinite(state.progress?.total) ? state.progress.total : 0
+      const progressDone = Number.isFinite(state.progress?.done) ? state.progress.done : 0
+      const progressPercent = progressTotal > 0 ? Math.min(100, Math.round((progressDone / progressTotal) * 100)) : 12
       const planned = state.phase === 'planned'
       const file = state.file
       const view = failed ? errorView(state, t) : null
@@ -742,6 +868,7 @@ window.__ModuleLoader__.load({
               ...current,
               workspaces,
               workspaceId: workspaces[0]?.id ?? '',
+              newWorkspace: workspaces.length === 0,
               error: current.workspacesFailed ? null : current.error,
               workspacesFailed: false,
             })
@@ -902,14 +1029,48 @@ window.__ModuleLoader__.load({
                         onClick: () => dialogStore.set({ ...dialogStore.get(), workspaces: null, workspacesFailed: false, workspaceMessage: null }),
                       }, t('dialog.retry')),
                     )
-                    : state.workspaces.length === 0
-                      ? h('span', { className: 'dst-field__value is-muted' }, t('dialog.workspace.empty'))
-                      : h('select', {
-                      className: 'dst-select',
-                      value: state.workspaceId,
-                      disabled: busy || inspecting,
-                      onChange: (event) => resetPlan({ workspaceId: event.target.value }),
-                    }, state.workspaces.map((workspace) => h('option', { key: workspace.id, value: workspace.id }, `${workspace.title} — ${workspace.path}`))),
+                    : h(React.Fragment, null,
+                      h('select', {
+                        className: 'dst-select',
+                        value: state.newWorkspace ? '__new__' : state.workspaceId,
+                        disabled: busy || inspecting || state.workspaceBusy,
+                        onChange: (event) => {
+                          if (event.target.value === '__new__') {
+                            dialogStore.set({ ...dialogStore.get(), newWorkspace: true, workspaceError: null })
+                          } else {
+                            resetPlan({ workspaceId: event.target.value, newWorkspace: false })
+                          }
+                        },
+                      },
+                        state.workspaces.map((workspace) => h('option', { key: workspace.id, value: workspace.id }, `${workspace.title} — ${workspace.path}`)),
+                        h('option', { value: '__new__' }, t('dialog.workspace.new')),
+                      ),
+                      state.newWorkspace && h('div', { className: 'dst-newWs' },
+                        h('input', {
+                          className: 'dst-input',
+                          type: 'text',
+                          value: state.workspacePath,
+                          placeholder: t('dialog.workspace.path'),
+                          disabled: state.workspaceBusy,
+                          onChange: (event) => dialogStore.set({ ...dialogStore.get(), workspacePath: event.target.value }),
+                        }),
+                        h('div', { className: 'dst-newWs__actions' },
+                          h('button', {
+                            type: 'button',
+                            className: 'dst-button is-primary',
+                            disabled: state.workspaceBusy || state.workspacePath.trim() === '',
+                            onClick: () => void createWorkspaceNow(t),
+                          }, state.workspaceBusy ? t('dialog.workspace.creating') : t('dialog.workspace.create')),
+                          h('button', {
+                            type: 'button',
+                            className: 'dst-button is-ghost',
+                            disabled: state.workspaceBusy,
+                            onClick: () => dialogStore.set({ ...dialogStore.get(), newWorkspace: false, workspaceError: null }),
+                          }, t('dialog.cancel')),
+                        ),
+                        state.workspaceError !== null && h('div', { className: 'dst-field__error' }, state.workspaceError),
+                      ),
+                    ),
               ),
               h('div', {
                 className: dragOver ? 'dst-drop is-over' : 'dst-drop',
@@ -963,7 +1124,17 @@ window.__ModuleLoader__.load({
                 onBoxMode: (mode) => dialogStore.set({ ...dialogStore.get(), boxMode: mode }),
                 t,
               }),
-              busy && h('div', { className: 'dst-working' },
+              busy && state.progress !== null && h('div', { className: 'dst-working' },
+                h('div', { className: 'dst-progress is-wide' },
+                  h('div', {
+                    className: 'dst-progress__bar',
+                    style: { width: `${progressPercent}%` },
+                  }),
+                ),
+                h('span', {}, progressLabel(state.progress, t)),
+                h('span', { className: 'dst-working__hint' }, t('dialog.workingHint')),
+              ),
+              busy && state.progress === null && h('div', { className: 'dst-working' },
                 h('span', { className: 'dst-spinner' }),
                 h('span', {}, t('dialog.working')),
                 h('span', { className: 'dst-working__hint' }, t('dialog.workingHint')),
@@ -1048,6 +1219,11 @@ window.__ModuleLoader__.load({
       '.dst-plan__row{display:flex;gap:10px;font-size:12px;line-height:1.45}',
       '.dst-plan__key{flex:none;width:64px;color:var(--dsw-alias-label-secondary)}',
       '.dst-plan__value{flex:1;min-width:0;word-break:break-word}',
+      '.dst-newWs{display:flex;flex-direction:column;gap:6px;margin-top:8px}',
+      '.dst-newWs__actions{display:flex;gap:6px}',
+      '.dst-input{width:100%;height:30px;padding:0 8px;box-sizing:border-box;border-radius:7px;border:1px solid var(--dsw-alias-border-l2);',
+      'background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);font:inherit;font-size:12px}',
+      '.dst-progress.is-wide{width:100%;height:5px;margin-top:4px}',
       '.dst-planBox{margin-top:10px;padding-top:8px;border-top:1px solid var(--dsw-alias-border-l2)}',
       '.dst-planBox__head{font-size:12px;font-weight:600}',
       '.dst-planBox__note{margin-top:3px;font-size:11px;color:var(--dsw-alias-label-secondary);word-break:break-word}',
