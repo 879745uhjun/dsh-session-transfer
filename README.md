@@ -130,6 +130,10 @@ Packs are **not encrypted**. They contain the full conversation, which may inclu
   - The host keeps a diagnostics log at `~/.dsh/tmp/session-transfer.log` (failures only);
   - "Session no longer exists" means the sidebar still shows a deleted row; refresh the list and pick another session.
 
+## Self-test
+
+The plugin detail page (Settings → Plugins → dsh-session-transfer) ends with a **Self-test** section. It only runs when you press **Run self-test** (never on mount), checks the health route, the three agent tools, optional boxes availability (a miss is only a note), and export-directory writability with a zero-byte probe file that is removed afterwards. Each check has a 2 s timeout; the summary can be copied as Markdown.
+
 ## Development
 
 ```bash

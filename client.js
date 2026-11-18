@@ -29,6 +29,23 @@ window.__ModuleLoader__.load({
 
     const EN = {
       'menu.pack': 'Pack session…',
+      'selftest.title': 'Self-test',
+      'selftest.run': 'Run self-test',
+      'selftest.rerun': 'Run again',
+      'selftest.copy': 'Copy result',
+      'selftest.copied': 'Copied',
+      'selftest.summary': '{pass} passed · {fail} failed · {warn} notes',
+      'selftest.idle': 'Not run',
+      'selftest.running': 'Running',
+      'selftest.pass': 'Pass',
+      'selftest.fail': 'Fail',
+      'selftest.warn': 'Note',
+      'selftest.error': 'Could not run the self-test: {error}',
+      'selftest.lang': 'en',
+      'selftest.item.health': 'Health endpoint',
+      'selftest.item.tools': 'Agent tools',
+      'selftest.item.boxes': 'Boxes availability',
+      'selftest.item.writable': 'Export directory writable',
       'menu.packBox': 'Pack its box…',
       'box.pick.title': 'Pack the whole box',
       'box.pick.hint': 'This session sits in several boxes. Pick one to pack every session in it, including its sub-boxes.',
@@ -119,6 +136,23 @@ window.__ModuleLoader__.load({
 
     const ZH = {
       'menu.pack': '打包会话…',
+      'selftest.title': '自检',
+      'selftest.run': '运行自检',
+      'selftest.rerun': '重新运行',
+      'selftest.copy': '复制结果',
+      'selftest.copied': '已复制',
+      'selftest.summary': '{pass} 通过 · {fail} 失败 · {warn} 提示',
+      'selftest.idle': '未运行',
+      'selftest.running': '运行中',
+      'selftest.pass': '通过',
+      'selftest.fail': '失败',
+      'selftest.warn': '提示',
+      'selftest.error': '无法运行自检：{error}',
+      'selftest.lang': 'zh',
+      'selftest.item.health': '健康检查',
+      'selftest.item.tools': '工具注册',
+      'selftest.item.boxes': '归盒可用性',
+      'selftest.item.writable': '导出目录可写',
       'menu.packBox': '打包所在盒子…',
       'box.pick.title': '打包整个盒子',
       'box.pick.hint': '这个会话在多个盒子里，选一个盒子打包（含盒内所有会话和直接子盒）。',
@@ -1233,6 +1267,22 @@ window.__ModuleLoader__.load({
       'color:var(--dsw-alias-label-secondary);font:inherit;font-size:11px;cursor:pointer}',
       '.dst-chip.is-on{border-color:var(--dsw-alias-brand-primary);background:color-mix(in srgb, var(--dsw-alias-brand-primary) 14%, transparent);',
       'color:var(--dsw-alias-brand-primary);font-weight:600}',
+      '.dst-selfTest{display:flex;flex-direction:column;gap:10px;padding:14px;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;',
+      'background:var(--dsw-alias-bg-layer-2);margin-top:16px}',
+      '.dst-selfTest__head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}',
+      '.dst-selfTest__title{font-size:13px;font-weight:600}',
+      '.dst-selfTest__summary{flex:1;min-width:120px;font-size:12px;color:var(--dsw-alias-label-secondary)}',
+      '.dst-selfTest__items{display:flex;flex-direction:column;gap:6px}',
+      '.dst-selfTest__row{display:grid;grid-template-columns:1fr auto;gap:4px 10px;align-items:center;font-size:12px}',
+      '.dst-selfTest__label{color:var(--dsw-alias-label-primary)}',
+      '.dst-selfTest__detail{grid-column:1/-1;font-size:11px;color:var(--dsw-alias-label-secondary);word-break:break-word}',
+      '.dst-selfTest__badge{justify-self:end;padding:1px 8px;border-radius:999px;font-size:11px;',
+      'border:1px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-secondary)}',
+      '.dst-selfTest__badge.is-pass{color:var(--dsw-alias-state-success-primary);border-color:currentColor}',
+      '.dst-selfTest__badge.is-fail{color:var(--dsw-alias-state-error-primary);border-color:currentColor}',
+      '.dst-selfTest__badge.is-warn{color:var(--dsw-alias-state-warn-primary);border-color:currentColor}',
+      '.dst-selfTest__badge.is-running{color:var(--dsw-alias-brand-primary);border-color:currentColor}',
+      '.dst-selfTest__error{font-size:12px;color:var(--dsw-alias-state-error-primary)}',
       '.dst-boxPickList{display:flex;flex-direction:column;gap:4px;max-height:40vh;overflow:auto}',
       '.dst-boxPickItem{display:flex;align-items:center;gap:8px;width:100%;padding:7px 9px;border:1px solid var(--dsw-alias-border-l2);',
       'border-radius:8px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);font:inherit;font-size:12px;cursor:pointer;text-align:left}',
@@ -1279,6 +1329,108 @@ window.__ModuleLoader__.load({
       '.dst-close:focus-visible,.dst-link:focus-visible,.dst-drop__pick:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}',
     ].join('')
 
+    /** Plugin-detail self-test: four checks, run only when the button is pressed. */
+    function SelfTestSection({ subject, t }) {
+      const pluginName = subject?.kind === 'bundle' ? subject.pkg?.name : undefined
+      const idleItems = () => ['health', 'tools', 'boxes', 'writable'].map((id) => ({
+        id,
+        label: t(`selftest.item.${id}`),
+        status: 'idle',
+      }))
+      const [state, setState] = React.useState(() => ({
+        running: false,
+        items: idleItems(),
+        summary: null,
+        error: null,
+        copied: false,
+        markdown: '',
+      }))
+      if (pluginName !== 'dsh-session-transfer') return null
+
+      const summary = state.running
+        ? t('selftest.running')
+        : state.summary === null
+          ? t('selftest.idle')
+          : t('selftest.summary', {
+            pass: String(state.summary.pass),
+            fail: String(state.summary.fail),
+            warn: String(state.summary.warn),
+          })
+
+      async function run() {
+        setState({
+          running: true,
+          items: idleItems().map((row) => ({ ...row, status: 'running' })),
+          summary: null,
+          error: null,
+          copied: false,
+          markdown: '',
+        })
+        const controller = new AbortController()
+        const timer = setTimeout(() => controller.abort(), 12000)
+        try {
+          const response = await fetch(`/session-transfer/selftest?lang=${encodeURIComponent(t('selftest.lang'))}`, { signal: controller.signal })
+          if (!response.ok) throw new Error(`HTTP ${response.status}`)
+          const payload = await response.json()
+          setState({
+            running: false,
+            items: Array.isArray(payload?.items) ? payload.items : idleItems(),
+            summary: payload?.summary ?? null,
+            error: null,
+            copied: false,
+            markdown: typeof payload?.markdown === 'string' ? payload.markdown : '',
+          })
+        } catch (error) {
+          const reason = messageOf(error)
+          setState({
+            running: false,
+            items: idleItems().map((row) => ({ ...row, status: 'fail', detail: reason })),
+            summary: { pass: 0, fail: 4, warn: 0 },
+            error: reason,
+            copied: false,
+            markdown: '',
+          })
+        } finally {
+          clearTimeout(timer)
+        }
+      }
+
+      async function copy() {
+        if (state.markdown === '') return
+        try {
+          await navigator.clipboard.writeText(state.markdown)
+          setState({ ...state, copied: true })
+        } catch {
+          /* clipboard denied; the result stays on screen */
+        }
+      }
+
+      return h('section', { className: 'dst-selfTest', 'data-plugin': 'dsh-session-transfer' },
+        h('div', { className: 'dst-selfTest__head' },
+          h('span', { className: 'dst-selfTest__title' }, t('selftest.title')),
+          h('span', { className: 'dst-selfTest__summary' }, summary),
+          h('button', {
+            type: 'button',
+            className: 'dst-button is-primary',
+            disabled: state.running,
+            onClick: () => void run(),
+          }, state.running ? t('selftest.running') : (state.summary === null ? t('selftest.run') : t('selftest.rerun'))),
+          h('button', {
+            type: 'button',
+            className: 'dst-button is-ghost',
+            disabled: state.markdown === '',
+            onClick: () => void copy(),
+          }, state.copied ? t('selftest.copied') : t('selftest.copy')),
+        ),
+        state.error !== null && h('div', { className: 'dst-selfTest__error' }, t('selftest.error', { error: state.error })),
+        h('div', { className: 'dst-selfTest__items' }, state.items.map((row) => h('div', { key: row.id, className: 'dst-selfTest__row' },
+          h('span', { className: 'dst-selfTest__label' }, row.label ?? row.id),
+          h('span', { className: `dst-selfTest__badge is-${row.status}` }, t(`selftest.${row.status}`)),
+          typeof row.detail === 'string' && row.detail !== '' && h('div', { className: 'dst-selfTest__detail' }, row.detail),
+        ))),
+      )
+    }
+
     /* ------------------------------------------------------------------ *
      * Client plugin
      * ------------------------------------------------------------------ */
@@ -1310,12 +1462,26 @@ window.__ModuleLoader__.load({
           void openDialog()
         }
 
+        ctx.slots.inject('plugins.detail.section', () => ctx.slots.register({
+          name: 'plugins.detail.section',
+          id: 'dsh-session-transfer.selftest',
+          order: 90,
+          locale: NS,
+        }, SelfTestSection))
+
         ctx.slots.inject('sidebar.workspaces.session.menu.item', () => ctx.slots.register({
           name: 'sidebar.workspaces.session.menu.item',
           id: 'session-transfer-menu',
           order: 120,
           locale: NS,
         }, SessionPackMenuItem))
+
+        ctx.slots.inject('plugins.detail.section', () => ctx.slots.register({
+          name: 'plugins.detail.section',
+          id: 'dsh-session-transfer.selftest',
+          order: 90,
+          locale: NS,
+        }, SelfTestSection))
 
         ctx.slots.inject('sidebar.workspaces.session.menu.item', () => ctx.slots.register({
           name: 'sidebar.workspaces.session.menu.item',

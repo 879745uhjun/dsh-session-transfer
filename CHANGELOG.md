@@ -3,6 +3,17 @@
 本文件记录 dsh-session-transfer 的每次可见变化。版本号遵循语义化版本；此前的迭代只在本地工作区进行，
 本仓库从 1.0.0 起有可追溯的提交历史。
 
+## 1.3.0 — 2026-11-18
+
+### 新增
+
+- **插件详情页「自检」区块**：入口 `plugins.detail.section`，id `dsh-session-transfer.selftest`，order 90，**只在点击时运行**。检查健康路由 200、`pack_session`/`unpack_session`/`pack_box` 三个工具注册、归盒可用性（可选依赖，失败只提示）、导出目录写探针（创建 0 字节文件后删除）；每项 2s 超时；显示汇总，可复制 Markdown。
+- 宿主新增 `GET /session-transfer/selftest`，返回 `items/summary/markdown`。
+
+### 测试
+
+- 新增 8 条自检用例（全部通过、缺工具、健康 404、盒子降级、超时、写失败、Markdown 形状、注册元数据）；测试 44 → 52。
+
 ## 1.2.0 — 2026-11-18
 
 ### 新增

@@ -1,0 +1,108 @@
+import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { test } from 'node:test'
+import { runSelftest, selftestMarkdown } from '../lib/selftest.mjs'
+
+const origin = 'http://127.0.0.1:1'
+const okJson = (value) => ({ ok: true, json: async () => value })
+const notFound = { ok: false, status: 404, json: async () => ({}) }
+
+function deps(overrides = {}) {
+  return {
+    origin,
+    fetchImpl: async (url) => {
+      if (url.endsWith('/session-transfer/health')) return okJson({ ok: true, version: '1.3.0' })
+      if (url.endsWith('/session-boxes')) return okJson({ ok: true, state: { boxes: [] } })
+      return notFound
+    },
+    hasTool: () => true,
+    writeProbe: async () => 'C:/Users/x/.dsh/session-packs',
+    timeoutMs: 200,
+    lang: 'zh',
+    ...overrides,
+  }
+}
+
+test('every check passes when the host answers, tools exist, and the probe writes', async () => {
+  const result = await runSelftest(deps())
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.summary, { pass: 4, fail: 0, warn: 0 })
+  assert.deepEqual(result.items.map((row) => row.status), ['pass', 'pass', 'pass', 'pass'])
+  assert.match(result.markdown, /^- \[x\] 健康检查 — 通过$/mu)
+  assert.match(result.markdown, /导出目录可写 — 通过/u)
+})
+
+test('a missing tool fails only that item', async () => {
+  const result = await runSelftest(deps({ hasTool: (name) => name !== 'pack_box' }))
+  assert.equal(result.summary.fail, 1)
+  assert.equal(result.items.find((row) => row.id === 'tools').status, 'fail')
+  assert.match(result.items.find((row) => row.id === 'tools').detail, /pack_box/u)
+  assert.equal(result.items.find((row) => row.id === 'health').status, 'pass')
+  assert.equal(result.items.find((row) => row.id === 'writable').status, 'pass')
+})
+
+test('a 404 health endpoint fails and leaves the other checks alone', async () => {
+  const result = await runSelftest(deps({
+    fetchImpl: async (url) => url.endsWith('/session-transfer/health') ? notFound : okJson({ ok: true, state: { boxes: [] } }),
+  }))
+  assert.equal(result.items.find((row) => row.id === 'health').status, 'fail')
+  assert.match(result.items.find((row) => row.id === 'health').detail, /404/u)
+  assert.equal(result.items.find((row) => row.id === 'boxes').status, 'pass')
+  assert.equal(result.summary.fail, 1)
+})
+
+test('the optional boxes probe only warns', async () => {
+  const result = await runSelftest(deps({
+    fetchImpl: async (url) => url.endsWith('/session-transfer/health')
+      ? okJson({ ok: true, version: '1.3.0' })
+      : notFound,
+  }))
+  assert.equal(result.ok, true)
+  assert.equal(result.items.find((row) => row.id === 'boxes').status, 'warn')
+  assert.match(result.items.find((row) => row.id === 'boxes').detail, /归盒功能不可用/u)
+  assert.match(result.markdown, /归盒可用性 — 通过（提示：/u)
+})
+
+test('a hanging check times out without blocking the rest', async () => {
+  const result = await runSelftest(deps({
+    timeoutMs: 25,
+    fetchImpl: async (url) => {
+      if (url.endsWith('/session-transfer/health')) return new Promise(() => {})
+      return okJson({ ok: true, state: { boxes: [] } })
+    },
+  }))
+  const health = result.items.find((row) => row.id === 'health')
+  assert.equal(health.status, 'fail')
+  assert.match(health.detail, /超时/u)
+  assert.equal(result.items.find((row) => row.id === 'tools').status, 'pass')
+  assert.equal(result.items.find((row) => row.id === 'boxes').status, 'pass')
+})
+
+test('an unwritable export directory fails only that item', async () => {
+  const result = await runSelftest(deps({ writeProbe: async () => { throw new Error('EPERM: access denied') } }))
+  assert.equal(result.items.find((row) => row.id === 'writable').status, 'fail')
+  assert.match(result.items.find((row) => row.id === 'writable').detail, /EPERM/u)
+  assert.equal(result.summary.pass, 3)
+})
+
+test('Markdown marks failures and notes in the spec shape', () => {
+  const markdown = selftestMarkdown([
+    { id: 'a', label: '健康检查', status: 'pass' },
+    { id: 'b', label: '工具注册', status: 'fail', detail: '缺少：pack_box' },
+    { id: 'c', label: '归盒可用性', status: 'warn', detail: '归盒功能不可用：HTTP 404' },
+  ], 'zh')
+  assert.equal(markdown, [
+    '- [x] 健康检查 — 通过',
+    '- [ ] 工具注册 — 失败：缺少：pack_box',
+    '- [x] 归盒可用性 — 通过（提示：归盒功能不可用：HTTP 404）',
+  ].join('\n'))
+})
+
+test('the client registers the section with the required id and order', () => {
+  const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
+  assert.match(source, /name: 'plugins\.detail\.section'/u)
+  assert.match(source, /id: 'dsh-session-transfer\.selftest'/u)
+  assert.match(source, /order: 90/u)
+  assert.match(source, /'selftest\.title': '自检'/u)
+  assert.match(source, /'selftest\.title': 'Self-test'/u)
+})

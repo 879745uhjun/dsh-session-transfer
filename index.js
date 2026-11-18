@@ -18,11 +18,12 @@
  *
  * @module dsh-session-transfer
  */
-import { open, rename, rm, stat } from 'node:fs/promises'
+import { mkdir, open, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { appendFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { TransferError, SessionTransfer, MAX_PACK_BYTES, packFilename, asciiPackFilename, contentDisposition, isInside, resolveDshHome, detectFormatVersion } from './lib/transfer.mjs'
+import { runSelftest, SELFTEST_TIMEOUT_MS } from './lib/selftest.mjs'
 import { readFileSync } from 'node:fs'
 
 /** Cordis plugin name. */
@@ -48,6 +49,7 @@ const ROUTE_INSPECT = '/session-transfer/inspect'
 const ROUTE_HEALTH = '/session-transfer/health'
 const ROUTE_WORKSPACE = '/session-transfer/workspace'
 const ROUTE_PROGRESS = '/session-transfer/progress'
+const ROUTE_SELFTEST = '/session-transfer/selftest'
 
 /** How long one preflighted upload stays staged for its import. */
 const STAGED_TTL_MS = 60 * 60 * 1000
@@ -461,6 +463,52 @@ export function apply(ctx) {
         },
       })
 
+      const removeSelftest = scope.webServer.register({
+        kind: 'exact',
+        path: ROUTE_SELFTEST,
+        handler: async (request, response) => {
+          try {
+            if (!isAcceptableOrigin(request)) return sendJson(response, 403, { ok: false, error: 'cross-origin request refused' })
+            if (request.method !== 'GET') {
+              response.writeHead(405, { allow: 'GET', 'content-type': 'application/json; charset=utf-8' })
+              response.end(JSON.stringify({ ok: false, error: 'method not allowed' }))
+              return
+            }
+            let origin
+            try {
+              origin = scope.webServer.getOrigin()
+            } catch (error) {
+              throw new TransferError(`webServer 尚未绑定端口：${error instanceof Error ? error.message : String(error)}`, { code: 'TRANSFER_SELFTEST' })
+            }
+            const url = urlOf(request)
+            const lang = url?.searchParams.get('lang') === 'en' ? 'en' : 'zh'
+            const tools = ctx.get('tools')
+            const result = await runSelftest({
+              origin,
+              lang,
+              timeoutMs: SELFTEST_TIMEOUT_MS,
+              hasTool: (name) => {
+                try {
+                  return tools?.get?.(name) !== undefined
+                } catch {
+                  return false
+                }
+              },
+              writeProbe: async () => {
+                await mkdir(transfer.packsDir, { recursive: true })
+                const probe = join(transfer.packsDir, `.selftest-${randomUUID()}`)
+                await writeFile(probe, '')
+                await rm(probe, { force: true })
+                return transfer.packsDir
+              },
+            })
+            sendJson(response, 200, result)
+          } catch (error) {
+            sendFailure(response, error, log)
+          }
+        },
+      })
+
       const removeProgress = scope.webServer.register({
         kind: 'exact',
         path: ROUTE_PROGRESS,
@@ -687,6 +735,7 @@ export function apply(ctx) {
         },
       })
       return () => {
+        removeSelftest()
         removeProgress()
         removeWorkspace()
         removeHealth()
