@@ -1,6 +1,6 @@
 {
   "name": "dsh-session-transfer",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "description": "Pack any DSH session, its subagent sessions and attachments into a portable .dshpack, and import it into another DSH installation.",
   "type": "module",
   "main": "index.js",
@@ -39,6 +39,7 @@
     "dsh": ">=0.2.2-rc.1 <0.3.0"
   },
   "scripts": {
+    "pretest": "node scripts/check-syntax.mjs",
     "test": "node --test \"test/**/*.test.mjs\""
   },
   "license": "MIT",

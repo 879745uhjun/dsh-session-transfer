@@ -170,7 +170,7 @@ attachments/files/<sha256>/<文件名>   原样文件对象
 ## 开发
 
 ```bash
-npm test        # ZIP / 包格式 / 导入导出的单元测试（node:test，无外部依赖）
+npm test        # 先做全量语法预检，再跑 ZIP / 包格式 / 导入导出单测
 ```
 
 代码结构：

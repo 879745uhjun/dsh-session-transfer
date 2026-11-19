@@ -137,7 +137,7 @@ The plugin detail page (Settings → Plugins → dsh-session-transfer) ends with
 ## Development
 
 ```bash
-npm test   # zero-dependency node:test suite for ZIP, pack codec, and import/export
+npm test   # syntax-check every source first, then the zero-dependency node:test suite
 ```
 
 Development notes:
