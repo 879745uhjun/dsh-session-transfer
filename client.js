@@ -1329,9 +1329,20 @@ window.__ModuleLoader__.load({
       '.dst-close:focus-visible,.dst-link:focus-visible,.dst-drop__pick:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}',
     ].join('')
 
+    /** Resolve this plugin's name from either detail-subject shape (bundle or item). */
+    function subjectPluginName(subject) {
+      if (subject?.kind === 'bundle') return subject?.pkg?.name
+      if (subject?.kind === 'item' && typeof subject?.id === 'string') {
+        return subject.id === 'dsh-session-transfer' || subject.id === 'include:dsh-session-transfer'
+          ? 'dsh-session-transfer'
+          : undefined
+      }
+      return undefined
+    }
+
     /** Plugin-detail self-test: four checks, run only when the button is pressed. */
     function SelfTestSection({ subject, t }) {
-      const pluginName = subject?.kind === 'bundle' ? subject.pkg?.name : undefined
+      const pluginName = subjectPluginName(subject)
       const idleItems = () => ['health', 'tools', 'boxes', 'writable'].map((id) => ({
         id,
         label: t(`selftest.item.${id}`),
@@ -1520,6 +1531,7 @@ window.__ModuleLoader__.load({
           inject: () => ({ hostCtx: ctx }),
         }, ImportDialog))
       },
+      selftest: { subjectPluginName },
     }
   },
 })

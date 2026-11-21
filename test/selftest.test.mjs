@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
+import { runInNewContext } from 'node:vm'
 import { runSelftest, selftestMarkdown } from '../lib/selftest.mjs'
 
 const origin = 'http://127.0.0.1:1'
@@ -96,6 +97,42 @@ test('Markdown marks failures and notes in the spec shape', () => {
     '- [ ] 工具注册 — 失败：缺少：pack_box',
     '- [x] 归盒可用性 — 通过（提示：归盒功能不可用：HTTP 404）',
   ].join('\n'))
+})
+
+/** Load client.js in a VM with a stubbed module loader, then build the plugin object. */
+function loadClientPlugin() {
+  const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
+  let loadedModule
+  const window = { __ModuleLoader__: { load: (module) => { loadedModule = module } } }
+  runInNewContext(source, { window })
+  const fakeRequire = (id) => {
+    if (id === 'react') {
+      return {
+        createElement: () => ({}),
+        Fragment: 'Fragment',
+        useState: () => [null, () => {}],
+        useRef: () => ({}),
+        useEffect: () => {},
+        useSyncExternalStore: () => null,
+      }
+    }
+    throw new Error(`unexpected module ${id}`)
+  }
+  return loadedModule.factory(fakeRequire)
+}
+
+test('the self-test section recognises both detail-subject shapes', () => {
+  const plugin = loadClientPlugin()
+  assert.equal(plugin.selftest.subjectPluginName({ kind: 'bundle', pkg: { name: 'dsh-session-transfer' } }), 'dsh-session-transfer')
+  assert.equal(plugin.selftest.subjectPluginName({ kind: 'item', id: 'dsh-session-transfer' }), 'dsh-session-transfer')
+  assert.equal(plugin.selftest.subjectPluginName({ kind: 'item', id: 'include:dsh-session-transfer' }), 'dsh-session-transfer')
+})
+
+test('the self-test section ignores another plugin item subject', () => {
+  const plugin = loadClientPlugin()
+  assert.equal(plugin.selftest.subjectPluginName({ kind: 'item', id: 'include:dsh-session-todos' }), undefined)
+  assert.equal(plugin.selftest.subjectPluginName({ kind: 'item', id: 'include:dsh-session-transfer-extra' }), undefined)
+  assert.equal(plugin.selftest.subjectPluginName(undefined), undefined)
 })
 
 test('the client registers the section with the required id and order', () => {

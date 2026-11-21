@@ -3,6 +3,12 @@
 本文件记录 dsh-session-transfer 的每次可见变化。版本号遵循语义化版本；此前的迭代只在本地工作区进行，
 本仓库从 1.0.0 起有可追溯的提交历史。
 
+## 1.3.2 — 2026-11-21
+
+### 修复
+
+- 插件详情页自检区块兼容 `plugins.detail.section` 的两种 subject：`{kind:"bundle", pkg}` 与 `{kind:"item", id}`（`dsh-session-transfer` / `include:dsh-session-transfer`）；其它插件的 item subject 不渲染。新增 2 条用例。
+
 ## 1.3.1 — 2026-11-19
 
 ### 构建
