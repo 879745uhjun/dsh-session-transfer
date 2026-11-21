@@ -135,6 +135,59 @@ test('the self-test section ignores another plugin item subject', () => {
   assert.equal(plugin.selftest.subjectPluginName(undefined), undefined)
 })
 
+/** Build one isolated pack-toast store with a manual scheduler. */
+function toastHarness() {
+  const plugin = loadClientPlugin()
+  let state = null
+  const store = {
+    get: () => state,
+    set: (next) => {
+      state = next
+    },
+    subscribe: () => () => {},
+  }
+  const timers = []
+  const toast = plugin.selftest.createPackToast({
+    createStore: () => store,
+    schedule: (callback, ms) => {
+      timers.push({ callback, ms })
+      return timers.length
+    },
+  })
+  return { toast, timers, read: () => state }
+}
+
+test('a failed pack toast clears itself after 6 seconds', () => {
+  const { toast, timers, read } = toastHarness()
+  toast.publish({ status: 'failed', error: '这个会话不在任何盒子里', code: 'BOX_NONE' }, 6000)
+  assert.equal(read().status, 'failed')
+  assert.equal(timers.length, 1)
+  assert.equal(timers[0].ms, 6000)
+  timers[0].callback()
+  assert.equal(read().status, 'idle')
+})
+
+test('manual dismiss clears the toast immediately and survives its timer', () => {
+  const { toast, timers, read } = toastHarness()
+  toast.publish({ status: 'failed', error: 'x', code: 'BOX_NONE' }, 6000)
+  toast.dismiss()
+  assert.equal(read().status, 'idle')
+  timers[0].callback()
+  assert.equal(read().status, 'idle')
+})
+
+test('a stale failure timer never clears a newer success', () => {
+  const { toast, timers, read } = toastHarness()
+  toast.publish({ status: 'failed', error: 'x', code: 'BOX_NONE' }, 6000)
+  toast.publish({ status: 'done' }, 4000)
+  assert.equal(read().status, 'done')
+  assert.equal(timers[1].ms, 4000)
+  timers[0].callback()
+  assert.equal(read().status, 'done', 'old failure timer must not clear the success')
+  timers[1].callback()
+  assert.equal(read().status, 'idle')
+})
+
 test('the client registers the section with the required id and order', () => {
   const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
   assert.match(source, /name: 'plugins\.detail\.section'/u)

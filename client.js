@@ -129,6 +129,7 @@ window.__ModuleLoader__.load({
       'pack.card.missing': 'The session may have been deleted; the sidebar was refreshed. Pick another session.',
       'pack.card.host': 'The host half is not answering. Restart DSH or check that the plugin is enabled.',
       'pack.card.cancel': 'Cancel',
+      'pack.card.close': 'Dismiss this message',
       'error.workspaces': 'Could not read the workspace list',
       'error.http': 'The host answered HTTP {status}',
       'warn.title': 'Notes',
@@ -236,6 +237,7 @@ window.__ModuleLoader__.load({
       'pack.card.missing': '这个会话可能已被删除；已刷新侧边栏，请重新选择会话。',
       'pack.card.host': '插件宿主没有响应：请重启 DSH，或在设置里确认插件已启用。',
       'pack.card.cancel': '取消',
+      'pack.card.close': '关闭这条提示',
       'error.workspaces': '无法读取工作区列表',
       'error.http': '宿主返回 HTTP {status}',
       'warn.title': '提示',
@@ -265,6 +267,37 @@ window.__ModuleLoader__.load({
       return useSyncExternalStore(store.subscribe, store.get, store.get)
     }
 
+    /** Idle pack-toast state, also the base for every published result. */
+    const PACK_IDLE = { status: 'idle', title: '', sessionId: '', received: 0, total: 0, error: null, code: null, seq: 0 }
+
+    /**
+     * One pack-toast store with sequence-guarded timers: a stale timer never
+     * clears a newer result, and a manual dismiss wins immediately.
+     * @param options - store factory and scheduler override (tests).
+     * @returns the store and its publish/dismiss operations.
+     */
+    function createPackToast(options = {}) {
+      const store = (options.createStore ?? createStore)({ ...PACK_IDLE })
+      const schedule = options.schedule ?? ((callback, ms) => setTimeout(callback, ms))
+      let sequence = 0
+      function publish(next, autoIdleMs) {
+        const id = ++sequence
+        store.set({ ...PACK_IDLE, ...next, seq: id })
+        if (autoIdleMs !== undefined) {
+          schedule(() => {
+            if (store.get().seq !== id) return
+            store.set({ ...PACK_IDLE, seq: id })
+          }, autoIdleMs)
+        }
+        return id
+      }
+      function dismiss() {
+        sequence += 1
+        store.set({ ...PACK_IDLE, seq: sequence })
+      }
+      return { store, publish, dismiss }
+    }
+
     const EMPTY_DIALOG = {
       open: false,
       file: null,
@@ -288,7 +321,8 @@ window.__ModuleLoader__.load({
     const EMPTY_BOX_PICK = { open: false, sessionId: '', title: '', boxes: [] }
     const dialogStore = createStore(EMPTY_DIALOG)
     const boxPickStore = createStore(EMPTY_BOX_PICK)
-    const packStore = createStore({ status: 'idle', title: '', sessionId: '', received: 0, total: 0, error: null })
+    const packToast = createPackToast()
+    const packStore = packToast.store
 
     const abortable = { current: null }
     let inspectSequence = 0
@@ -408,7 +442,7 @@ window.__ModuleLoader__.load({
       abortable.current?.abort()
       const controller = new AbortController()
       abortable.current = controller
-      packStore.set({ status: 'preparing', title: title ?? '', sessionId, received: 0, total: 0, error: null })
+      packToast.publish({ status: 'preparing', title: title ?? '', sessionId })
       try {
         const query = boxId === undefined ? new URLSearchParams({ sessionId }) : new URLSearchParams({ boxId })
         if (boxId === undefined && typeof title === 'string' && title.trim() !== '') query.set('title', title.trim())
@@ -425,7 +459,7 @@ window.__ModuleLoader__.load({
             if (done) break
             chunks.push(value)
             received += value.byteLength
-            packStore.set({ status: 'downloading', title: title ?? '', sessionId, received, total, error: null })
+            packToast.publish({ status: 'downloading', title: title ?? '', sessionId, received, total })
           }
         } else {
           const buffer = new Uint8Array(await response.arrayBuffer())
@@ -433,19 +467,16 @@ window.__ModuleLoader__.load({
           received = buffer.byteLength
         }
         const blob = new Blob(chunks, { type: 'application/zip' })
-        packStore.set({ status: 'saving', title: title ?? '', sessionId, received, total, error: null })
+        packToast.publish({ status: 'saving', title: title ?? '', sessionId, received, total })
         const outcome = await saveBlob(blob, filename)
         if (outcome === 'cancelled') {
-          packStore.set({ status: 'idle', title: '', sessionId: '', received: 0, total: 0, error: null })
+          packToast.dismiss()
           return
         }
-        packStore.set({ status: 'done', title: title ?? '', sessionId, received, total, error: null })
-        setTimeout(() => {
-          if (packStore.get().status === 'done') packStore.set({ status: 'idle', title: '', sessionId: '', received: 0, total: 0, error: null })
-        }, 4000)
+        packToast.publish({ status: 'done', title: title ?? '', sessionId, received, total }, 4000)
       } catch (error) {
         if (controller.signal.aborted) {
-          packStore.set({ status: 'idle', title: '', sessionId: '', received: 0, total: 0, error: null })
+          packToast.dismiss()
           return
         }
         if (error?.code === 'TRANSFER_SESSION_NOT_FOUND') {
@@ -455,7 +486,7 @@ window.__ModuleLoader__.load({
             /* the next focus refresh repairs the list anyway */
           }
         }
-        packStore.set({ status: 'failed', title: title ?? '', sessionId, received: 0, total: 0, error: messageOf(error), code: error?.code ?? null })
+        packToast.publish({ status: 'failed', title: title ?? '', sessionId, error: messageOf(error), code: error?.code ?? null }, 6000)
       } finally {
         if (abortable.current === controller) abortable.current = null
       }
@@ -528,7 +559,7 @@ window.__ModuleLoader__.load({
       try {
         const boxes = await boxesForSession(sessionId)
         if (boxes.length === 0) {
-          packStore.set({ status: 'failed', title: displayTitle ?? '', sessionId, received: 0, total: 0, error: '这个会话不在任何盒子里', code: 'BOX_NONE' })
+          packToast.publish({ status: 'failed', title: displayTitle ?? '', sessionId, error: '这个会话不在任何盒子里', code: 'BOX_NONE' }, 6000)
           return
         }
         if (boxes.length === 1) {
@@ -537,7 +568,7 @@ window.__ModuleLoader__.load({
         }
         boxPickStore.set({ open: true, sessionId, title: displayTitle ?? '', boxes })
       } catch (error) {
-        packStore.set({ status: 'failed', title: displayTitle ?? '', sessionId, received: 0, total: 0, error: `读取盒子失败：${messageOf(error)}`, code: 'BOX_ERROR' })
+        packToast.publish({ status: 'failed', title: displayTitle ?? '', sessionId, error: `读取盒子失败：${messageOf(error)}`, code: 'BOX_ERROR' }, 6000)
       }
     }
 
@@ -789,10 +820,25 @@ window.__ModuleLoader__.load({
             : state.status === 'downloading'
               ? t('pack.card.downloading', { percent: String(percent) })
               : t('pack.card.preparing')
-      return h('div', { className: 'dst-toast is-card', role: 'status' },
+      return h('div', {
+        className: 'dst-toast is-card',
+        role: 'status',
+        title: t('pack.card.close'),
+        onClick: () => packToast.dismiss(),
+      },
         h('div', { className: 'dst-toast__head' },
           h('span', { className: state.status === 'failed' ? 'dst-dot is-error' : state.status === 'done' ? 'dst-dot is-ok' : 'dst-dot is-busy' }),
           h('span', { className: 'dst-toast__title' }, state.title === '' ? t('pack.card.title') : state.title),
+          h('button', {
+            type: 'button',
+            className: 'dst-toast__close',
+            title: t('pack.card.close'),
+            'aria-label': t('pack.card.close'),
+            onClick: (event) => {
+              event.stopPropagation()
+              packToast.dismiss()
+            },
+          }, '×'),
         ),
         h('div', { className: 'dst-toast__text' }, description),
         state.status === 'failed' && state.code === 'TRANSFER_SESSION_NOT_FOUND' && h('div', { className: 'dst-toast__hint' }, t('pack.card.missing')),
@@ -803,7 +849,10 @@ window.__ModuleLoader__.load({
         (state.status === 'preparing' || state.status === 'downloading') && h('button', {
           type: 'button',
           className: 'dst-link',
-          onClick: () => abortable.current?.abort(),
+          onClick: (event) => {
+            event.stopPropagation()
+            abortable.current?.abort()
+          },
         }, t('pack.card.cancel')),
       )
     }
@@ -1317,6 +1366,9 @@ window.__ModuleLoader__.load({
       '.dst-toast__head{display:flex;align-items:center;gap:8px}',
       '.dst-toast__title{font-weight:600;word-break:break-word}',
       '.dst-toast__text{color:var(--dsw-alias-label-secondary);word-break:break-word}',
+      '.dst-toast__close{margin-left:auto;width:20px;height:20px;border:0;border-radius:5px;background:transparent;',
+      'color:var(--dsw-alias-label-secondary);font:inherit;font-size:15px;line-height:1;cursor:pointer}',
+      '.dst-toast__close:hover{background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary)}',
       '.dst-toast__hint{margin-top:2px;font-size:11px;color:var(--dsw-alias-label-secondary);word-break:break-word}',
       '.dst-dot{width:8px;height:8px;border-radius:50%;background:var(--dsw-alias-label-secondary);flex:none}',
       '.dst-dot.is-ok{background:var(--dsw-alias-state-success-primary)}',
@@ -1531,7 +1583,7 @@ window.__ModuleLoader__.load({
           inject: () => ({ hostCtx: ctx }),
         }, ImportDialog))
       },
-      selftest: { subjectPluginName },
+      selftest: { subjectPluginName, createPackToast },
     }
   },
 })
